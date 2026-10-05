@@ -124,6 +124,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -177,10 +178,43 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.5.0"
+PLUGIN_VERSION = "1.6.0"
 TIMEOUT = 25
-RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
+WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
+RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
+RATE_GAP_MIN = 0.08      # 并发时的最快间隔（≈12 请求/秒，仍远低于 TMDB 的 50/秒）
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
+
+
+class RateLimiter:
+    """线程安全的全局限速器。
+
+    多线程后不能再用「记一个 _last 时间戳」那套 —— 那样每个线程各自放行，
+    实际速率会变成 N 倍。这里用「下一个可放行时刻」一次性推进，保证全局速率恒定。
+    """
+
+    def __init__(self, gap: float):
+        self.gap = max(0.0, float(gap))
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next - now
+            self._next = max(now, self._next) + self.gap
+        if delay > 0:
+            time.sleep(delay)
+
+
+def tmdb_gap(concurrency: int) -> float:
+    """并发下的 TMDB 请求间隔。
+
+    单线程（1）保持原来的 4 请求/秒不变；并发时按并发数等比放宽，
+    但下限 RATE_GAP_MIN（≈12/秒），避免把 TMDB 打到限流。
+    """
+    workers = max(1, int(concurrency or 1))
+    return max(RATE_GAP_MIN, RATE_GAP / workers)
 # 图片地址前缀由 image_host() 动态给出（跟随宿主的 TMDB_IMAGE_DOMAIN 设置）
 
 # 画质档位 → 各图片类型请求的 TMDB 尺寸。
@@ -860,6 +894,7 @@ class ImageManifest:
         self.path = Path(path) if path else None
         self.data: Dict[str, Dict[str, Any]] = {}
         self.dirty = False
+        self._lock = threading.Lock()          # 多线程下 record/matches 都要串行化
         if self.path and self.path.exists():
             try:
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -874,17 +909,19 @@ class ImageManifest:
 
     def matches(self, path: Path, url: str) -> bool:
         """清单能否证明「本地这张图就是该在线图」——能则不下载。"""
-        entry = self.data.get(self.key(path))
+        with self._lock:
+            entry = self.data.get(self.key(path))
         if not entry or entry.get("url") != url:
             return False
         return bool(entry.get("sha256")) and entry["sha256"] == sha256_file(path)
 
     def record(self, path: Path, url: str, digest: str, size: int) -> None:
-        self.data[self.key(path)] = {
-            "url": url, "sha256": digest, "size": size,
-            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        self.dirty = True
+        with self._lock:
+            self.data[self.key(path)] = {
+                "url": url, "sha256": digest, "size": size,
+                "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self.dirty = True
 
     def save(self) -> None:
         if not (self.path and self.dirty):
@@ -982,7 +1019,7 @@ class TmdbProvider:
 
     def __init__(self, api_key: str, language: str = "zh-CN", proxy: Optional[str] = None,
                  cert_country: str = "US", cast_limit: int = 20,
-                 image_quality: str = "standard"):
+                 image_quality: str = "standard", concurrency: int = 1):
         self.api_key = api_key
         self.language = language
         self.cert_country = (cert_country or "US").upper()
@@ -996,18 +1033,18 @@ class TmdbProvider:
         if proxy:
             handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
         self.opener = urllib.request.build_opener(*handlers)
-        self._last = 0.0
+        # 多线程下用线程安全的全局限速器（旧的「记时间戳」会被每个线程各自放行）
+        self.limiter = RateLimiter(tmdb_gap(concurrency))
+        self._lock = threading.Lock()
         self.calls = 0
 
     def _get(self, path: str, **params) -> Optional[dict]:
-        gap = time.time() - self._last
-        if gap < RATE_GAP:
-            time.sleep(RATE_GAP - gap)
+        self.limiter.wait()
         params.update({"api_key": self.api_key, "language": self.language})
         url = f"https://api.themoviedb.org/3{path}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        self._last = time.time()
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         try:
             with self.opener.open(req, timeout=TIMEOUT) as resp:
                 return json.loads(resp.read().decode("utf-8"))
@@ -1393,9 +1430,11 @@ class FileProvider:
             except Exception as exc:
                 logger.warning(f"读取缓存 JSON 失败：{cache_path}（{exc}）")
         self.calls = 0
+        self._lock = threading.Lock()
 
     def _lookup(self, key: str) -> Dict[str, List[str]]:
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         return self.data.get(key) or {}
 
     def fetch_movie(self, tmdb_id: str) -> Dict[str, List[str]]:
@@ -1465,6 +1504,7 @@ class EngineConfig:
     backup: bool = True
     backup_dir: Optional[Path] = None
     max_files: int = 0
+    concurrency: int = 1        # 处理并发数（1 = 顺序执行）
     report_limit: int = 300
     # ── 图片 ──（引擎默认关闭，由插件/CLI 显式开启，避免意外的网络流量）
     image_mode: str = IMG_OFF              # off | missing | sync
@@ -1508,6 +1548,26 @@ class Report:
     image_bytes: int = 0
     image_counts: Dict[str, int] = field(default_factory=dict)    # 图片差异判定统计
     image_applied: Dict[str, int] = field(default_factory=dict)   # 图片实际动作统计
+    _lock: Any = field(default_factory=threading.Lock, repr=False)
+
+    # ── 并发安全的自增入口（多线程下必须走这里，否则会丢计数）──────
+    def bump(self, name: str, n: int = 1) -> None:
+        with self._lock:
+            setattr(self, name, getattr(self, name, 0) + n)
+
+    def tally(self, bucket: str, key: str, n: int = 1) -> None:
+        with self._lock:
+            target = getattr(self, bucket)
+            target[key] = target.get(key, 0) + n
+
+    def add_error(self, text: str) -> None:
+        with self._lock:
+            self.errors.append(text)
+
+    def add_change(self, change: "Change", limit: int) -> None:
+        with self._lock:
+            if len(self.changes) < limit:
+                self.changes.append(change)
 
     def to_text(self) -> str:
         lines = [
@@ -1626,6 +1686,7 @@ class Engine:
         self.report = Report(mode=cfg.mode, provider=getattr(provider, "name", "?"))
         self.manifest = ImageManifest(cfg.manifest_path)
         self._warned_junk: set = set()      # 脏值告警去重，避免刷屏
+        self._lock = threading.Lock()       # 保护 _warned_junk 等并发共享状态
 
     def sanitize_remote(self, field: str, values: List[str]) -> List[str]:
         """护栏：拦掉「结构化对象被 str() 出来」的脏值。
@@ -1637,10 +1698,13 @@ class Engine:
         clean, junk = [], []
         for value in values:
             (junk if looks_like_object_repr(value) else clean).append(value)
-        if junk and field not in self._warned_junk:
-            self._warned_junk.add(field)
-            logger.warning(f"在线数据里的「{field}」疑似把结构化对象直接转成了字符串，"
-                           f"已跳过该值（请把这条反馈给数据源）：{junk[0][:80]}")
+        if junk:
+            with self._lock:
+                first_time = field not in self._warned_junk
+                self._warned_junk.add(field)
+            if first_time:
+                logger.warning(f"在线数据里的「{field}」疑似把结构化对象直接转成了字符串，"
+                               f"已跳过该值（请把这条反馈给数据源）：{junk[0][:80]}")
         return clean
 
     # ── 在线数据获取 ────────────────────────────────────────────────
@@ -1719,20 +1783,38 @@ class Engine:
         if self.cfg.max_files:
             targets = targets[: self.cfg.max_files]
 
-        logger.info(f"NFO 差异比对开始：待检查 {len(targets)} 个文件，模式 {self.cfg.mode}")
-        for index, path in enumerate(targets, 1):
+        workers = max(1, int(self.cfg.concurrency or 1))
+        pairs = [(path, next((r for r in self.cfg.roots if str(path).startswith(str(r))), path.parent))
+                 for path in targets]
+        logger.info(f"NFO 差异比对开始：待检查 {len(pairs)} 个文件，模式 {self.cfg.mode}"
+                    + (f"，并发 {workers}" if workers > 1 else ""))
+
+        def work(item: Tuple[Path, Path]) -> None:
             if self.cancel.is_set():
-                logger.info("收到停止信号，提前结束本轮")
-                break
-            root_dir = next((r for r in self.cfg.roots if str(path).startswith(str(r))), path.parent)
+                return
+            path, root_dir = item
             try:
                 self.process(path, root_dir)
             except Exception as exc:
-                self.report.failed += 1
-                self.report.errors.append(f"{path}：{exc}")
+                self.report.bump("failed")
+                self.report.add_error(f"{path}：{exc}")
                 logger.error(f"处理失败：{path}（{exc}）")
-            if index % 200 == 0:
-                logger.info(f"进度 {index}/{len(targets)}")
+
+        if workers > 1 and len(pairs) > 1:
+            # 主要收益在网络 I/O：图片下载、TMDB / fanart 查询、本地哈希都能并行起来。
+            # 共享状态（Report / 指纹清单 / 限速器）都已加锁，见各自的 bump/tally/add_* 入口。
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="nfogapfill") as pool:
+                for index, _ in enumerate(pool.map(work, pairs), 1):
+                    if index % 200 == 0:
+                        logger.info(f"进度 {index}/{len(pairs)}")
+        else:
+            for index, item in enumerate(pairs, 1):
+                if self.cancel.is_set():
+                    logger.info("收到停止信号，提前结束本轮")
+                    break
+                work(item)
+                if index % 200 == 0:
+                    logger.info(f"进度 {index}/{len(pairs)}")
 
         self.manifest.save()
         self.report.finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1768,12 +1850,12 @@ class Engine:
         # 目录被 #电影 / #电视剧 限定时，类型不符的 NFO 直接跳过
         forced = self.forced_type(root_dir)
         if not type_allowed(forced, nfo.media_type):
-            self.report.skipped_type += 1
+            self.report.bump("skipped_type")
             logger.debug(f"{rel}：所在目录被限定为「{TYPE_TAG_CN.get(forced or '', forced)}」，"
                          f"与 NFO 类型 {nfo.media_type} 不符，跳过")
             return
 
-        self.report.scanned += 1
+        self.report.bump("scanned")
 
         managed = MANAGED_FIELDS.get(nfo.media_type, [])
         if self.cfg.only_fields:
@@ -1784,8 +1866,8 @@ class Engine:
 
         remote, source = self.fetch_remote(nfo)
         if not remote:
-            self.report.unresolved += 1
-            self.report.errors.append(f"{rel}：{source}")
+            self.report.bump("unresolved")
+            self.report.add_error(f"{rel}：{source}")
             logger.warning(f"取不到在线数据，保持原样：{rel}（{source}）")
             return
 
@@ -1804,14 +1886,14 @@ class Engine:
                 # 在线没数据时就用本地剩下的正常值重写，避免把正常内容一起清空。
                 verdict, action = DIFF, REPLACE
                 write_vals = remote_vals or local_vals
-                self.report.scrubbed += len(junk_local)
+                self.report.bump("scrubbed", len(junk_local))
                 logger.info(f"{rel}：{name} 有 {len(junk_local) + junk_syn} 处历史脏值"
                             f"（同义标签 {junk_syn} 处），将整体重写清除")
             else:
                 verdict, action = compare(kind, local_vals, remote_vals)
                 write_vals = remote_vals
 
-            self.report.counts[verdict] = self.report.counts.get(verdict, 0) + 1
+            self.report.tally("counts", verdict)
             if action == SKIP:
                 continue
 
@@ -1830,9 +1912,9 @@ class Engine:
             else:
                 applied, do_write = REPLACE, True
 
-            self.report.applied[applied] = self.report.applied.get(applied, 0) + 1
+            self.report.tally("applied", applied)
             if is_locked:
-                self.report.skipped_locked += 1
+                self.report.bump("skipped_locked")
             self.record(rel, nfo.media_type, name, verdict, applied, local_vals, remote_vals)
             if do_write:
                 plan.append((name, action == REPLACE, write_vals))
@@ -1840,7 +1922,7 @@ class Engine:
         pending_images = self.process_images(nfo, rel, root_dir)
 
         if not plan and not pending_images:
-            self.report.untouched += 1
+            self.report.bump("untouched")
             return
         if self.cfg.dry_run:
             if plan:
@@ -1854,10 +1936,10 @@ class Engine:
         for name, replace, values in plan:
             scrubbed = write_local_values(nfo, name, values, replace=replace)
             if scrubbed:
-                self.report.scrubbed += scrubbed
+                self.report.bump("scrubbed", scrubbed)
                 logger.info(f"{rel}：{name} 顺带清掉 {scrubbed} 处同义标签里的历史脏值")
         write_nfo_file(nfo, (self.cfg.backup_dir if self.cfg.backup else None), root_dir)
-        self.report.changed_files += 1
+        self.report.bump("changed_files")
         logger.info(f"已更新 {rel}：{', '.join(p[0] for p in plan)}")
 
     # ── 图片 ────────────────────────────────────────────────────────
@@ -1904,12 +1986,12 @@ class Engine:
             url = urls.get(spec.kind)
             if not url:
                 continue
-            self.report.images_scanned += 1
+            self.report.bump("images_scanned")
             label = f"[图片] {spec.kind} → {path.name}" + ("（别名）" if spec.alias else "")
 
             # Kodi 的 lockdata 表示「整个条目不许改」，lockedfields 可按字段名锁单张图
             if locked is True or spec.kind.casefold() in locked_names:
-                self.report.skipped_locked += 1
+                self.report.bump("skipped_locked")
                 self.__image_change(rel, "未比对", "跳过（NFO 锁定）", label,
                                     "lockdata / lockedfields", url)
                 continue
@@ -1932,7 +2014,7 @@ class Engine:
                 cache[url] = reader(url) if callable(reader) else None
             data = cache[url]
             if not data:
-                self.report.errors.append(f"{rel}：图片下载失败（{spec.kind}）{url}")
+                self.report.add_error(f"{rel}：图片下载失败（{spec.kind}）{url}")
                 continue
 
             digest = hashlib.sha256(data).hexdigest()
@@ -1956,30 +2038,28 @@ class Engine:
                 write_image_bytes(path, data,
                                   self.cfg.backup_dir if self.cfg.backup else None, root_dir)
                 self.manifest.record(path, url, digest, len(data))
-                self.report.images_written += 1
-                self.report.image_bytes += len(data)
+                self.report.bump("images_written")
+                self.report.bump("image_bytes", len(data))
                 self.__image_change(rel, verdict, action, label, local_desc, url)
                 logger.info(f"图片{action}：{path}")
         return actionable
 
     def __image_change(self, rel: str, verdict: str, action: str, field: str,
                        local: str, remote: str) -> None:
-        self.report.image_counts[verdict] = self.report.image_counts.get(verdict, 0) + 1
-        self.report.image_applied[action] = self.report.image_applied.get(action, 0) + 1
+        self.report.tally("image_counts", verdict)
+        self.report.tally("image_applied", action)
         if len(self.report.changes) >= self.cfg.report_limit:
             return
-        self.report.changes.append(Change(
+        self.report.add_change(Change(
             nfo=rel, media_type="图片", field=field, verdict=verdict, action=action,
-            local=local[:200], remote=remote[:200]))
+            local=local[:200], remote=remote[:200]), self.cfg.report_limit)
 
     def record(self, rel: str, media_type: str, name: str, verdict: str,
                action: str, local_vals: List[str], remote_vals: List[str]) -> None:
-        if len(self.report.changes) >= self.cfg.report_limit:
-            return
-        self.report.changes.append(Change(
+        self.report.add_change(Change(
             nfo=rel, media_type=media_type, field=name, verdict=verdict, action=action,
             local=" ｜ ".join(local_vals)[:200], remote=" ｜ ".join(remote_vals)[:200],
-        ))
+        ), self.cfg.report_limit)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2013,6 +2093,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _enabled: bool = False
     _onlyonce: bool = False
     _cron: str = ""
+    _concurrency: int = 4
     _mode: str = "sync"
     _paths: str = ""
     _exclude_paths: str = ""
@@ -2039,6 +2120,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._enabled = bool(config.get("enabled"))
             self._onlyonce = bool(config.get("onlyonce"))
             self._cron = (config.get("cron") or "").strip()
+            self._concurrency = max(1, min(16, self.__int(config.get("concurrency"), 4)))
             self._mode = config.get("mode") or "sync"
             self._paths = config.get("paths") or ""
             self._exclude_paths = config.get("exclude_paths") or ""
@@ -2125,8 +2207,34 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                     ]}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VCronField", "props": {
-                                    "model": "cron", "label": "执行周期",
-                                    "placeholder": "5 位 cron，例如 0 3 * * * 表示每天 03:00"}}]},
+                                    "model": "cron", "label": "执行周期（留空 = 每周日凌晨 3 点跑一次）",
+                                    "placeholder": "留空 = 每周一次；也可填 5 位 cron，如 0 3 * * * 表示每天 03:00"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "concurrency",
+                                    "label": "并发数（加快比对速度）",
+                                    "items": [
+                                        {"title": "1 — 顺序执行（最省资源）", "value": "1"},
+                                        {"title": "4 — 推荐（默认）", "value": "4"},
+                                        {"title": "6", "value": "6"},
+                                        {"title": "8 — 网络很好时可以试", "value": "8"},
+                                    ]}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "「并发数」决定同时处理多少个 NFO：主要收益在网络等待（图片下载、"
+                                         "TMDB 与 fanart.tv 查询），对本地磁盘与 CPU 压力很小，"
+                                         "所以开着基本只有好处。并发时 TMDB 的请求速率会按比例放宽"
+                                         "（上限约 12 请求/秒，仍远低于其限制），单线程则维持原来的 4 请求/秒。"}]},
                         ],
                     },
                     {
@@ -2385,7 +2493,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "onlyonce": False,
             "notify": True,
             "mode": "sync",
-            "cron": "0 3 * * *",
+            "cron": "",              # 留空 = 每周日凌晨 3 点一次（见 WEEKLY_CRON）
+            "concurrency": "4",
             "dry_run": False,
             "respect_lock": True,
             "backup": True,
@@ -2536,12 +2645,13 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
 
     def get_service(self) -> List[Dict[str, Any]]:
         if self._enabled and CronTrigger is not None:
-            cron = self._cron or "0 3 * * *"
+            # 「执行周期」留空 = 每周执行一次（表单里默认就是空的，用户不需要懂 cron）
+            cron = (self._cron or "").strip() or WEEKLY_CRON
             try:
                 trigger = CronTrigger.from_crontab(cron)
             except Exception as exc:
-                logger.error(f"cron 表达式无效（{cron}）：{exc}，已回退为每天 03:00")
-                trigger = CronTrigger.from_crontab("0 3 * * *")
+                logger.error(f"cron 表达式无效（{cron}）：{exc}，已回退为每周一次（{WEEKLY_CRON}）")
+                trigger = CronTrigger.from_crontab(WEEKLY_CRON)
             return [{
                 "id": "NfoGapFill",
                 "name": "NFO 差异比对与补齐",
@@ -2563,6 +2673,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "notify": self._notify,
                 "mode": self._mode,
                 "cron": self._cron,
+                "concurrency": str(self._concurrency),
                 "dry_run": self._dry_run,
                 "respect_lock": self._respect_lock,
                 "backup": self._backup,
@@ -2627,7 +2738,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "插件内单独配置的 API Key" if own_key else "自动读取 MoviePilot 中配置的 API Key",
                 "，代理沿用宿主的" if proxy else ""))
             return TmdbProvider(key, self._language, proxy or None,
-                                self._cert_country, limit, quality)
+                                self._cert_country, limit, quality,
+                                concurrency=self._concurrency)
         logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
                        "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
         return HostProvider(quality, limit)
@@ -2672,6 +2784,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 dry_run=self._dry_run,
                 backup=self._backup,
                 max_files=0,          # 插件不再提供单轮上限（引擎仍支持，CLI 用 --max-files）
+                concurrency=self._concurrency,
                 image_mode=(self._image_mode if self._image_mode in (IMG_OFF, IMG_MISSING, IMG_SYNC)
                             else IMG_SYNC),
                 image_kinds=self.__image_kinds_set(),
@@ -2782,6 +2895,8 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--proxy", default=None, help="代理，如 http://127.0.0.1:7890")
     parser.add_argument("--cert-country", default="US", help="分级地区码，默认 US")
     parser.add_argument("--cast-limit", type=int, default=20, help="演员写入上限，默认 20；0 = 全部写入")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="并发处理数（1 = 顺序；插件默认 4）")
     parser.add_argument("--max-files", type=int, default=0, help="单轮最多处理多少个 NFO")
     parser.add_argument("--no-backup", action="store_true", help="不备份原文件（不推荐）")
     parser.add_argument("--backup-dir", default="", help="备份目录，默认 <root>/.nfo-backup")
@@ -2825,6 +2940,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
         backup=not args.no_backup,
         backup_dir=Path(args.backup_dir).expanduser() if args.backup_dir else roots[0] / ".nfo-backup",
         max_files=args.max_files,
+        concurrency=max(1, args.concurrency),
         image_mode=args.image_mode,
         image_kinds=(image_kinds & set(IMAGE_KINDS)) or set(IMAGE_KINDS),
         image_quality=args.image_quality,

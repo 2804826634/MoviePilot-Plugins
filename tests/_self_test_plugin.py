@@ -592,6 +592,76 @@ finally:
     module.mp_setting = _orig_mp
 check("恢复后语言偏好回到默认 zh,en", module.fanart_lang_order() == ["zh", "en"])
 
+print()
+print("=" * 70)
+print("并发（多线程）与「执行周期」留空 = 每周一次")
+print("=" * 70)
+check("并发下的 TMDB 间隔：单线程保持 4/秒，并发时放宽但设下限",
+      module.tmdb_gap(1) == module.RATE_GAP
+      and abs(module.tmdb_gap(2) - 0.125) < 1e-9
+      and module.tmdb_gap(4) == module.RATE_GAP_MIN
+      and module.tmdb_gap(64) == module.RATE_GAP_MIN)
+
+# 限速器必须是「全局」的：多线程一起抢，总速率也不能翻倍
+limiter = module.RateLimiter(0.02)
+_start = time.monotonic()
+with module.ThreadPoolExecutor(max_workers=8) as pool:
+    list(pool.map(lambda _: limiter.wait(), range(8)))
+_elapsed = time.monotonic() - _start
+check("RateLimiter 在多线程下仍保持全局速率（8 次 × 20ms 至少 120ms）",
+      _elapsed >= 0.12, f"实际 {_elapsed:.3f}s")
+
+# 「执行周期」留空 → 每周日凌晨 3 点
+check("执行周期默认值是空的（用户不用懂 cron）", defaults["cron"] == "")
+check("留空时的默认周期 = 每周日 03:00", module.WEEKLY_CRON == "0 3 * * 0")
+
+
+class _FakeCronTrigger:
+    """模拟 apscheduler 的 CronTrigger：字段数不对就抛错。"""
+
+    captured = []
+
+    @classmethod
+    def from_crontab(cls, expr):
+        cls.captured.append(expr)
+        if len(str(expr or "").split()) != 5:
+            raise ValueError("Wrong number of fields; got 1, expected 5")
+        return ("cron-trigger", expr)
+
+
+_real_cron = module.CronTrigger
+module.CronTrigger = _FakeCronTrigger
+try:
+    cron_plugin = module.NfoGapFill()
+    cron_plugin.init_plugin({**defaults, "enabled": True, "cron": ""})
+    cron_plugin.get_service()
+    check("get_service 在留空时用每周周期注册", _FakeCronTrigger.captured[-1] == module.WEEKLY_CRON,
+          str(_FakeCronTrigger.captured))
+
+    cron_plugin.init_plugin({**defaults, "enabled": True, "cron": "0 */6 * * *"})
+    cron_plugin.get_service()
+    check("填了 cron 就按填的来", _FakeCronTrigger.captured[-1] == "0 */6 * * *")
+
+    cron_plugin.init_plugin({**defaults, "enabled": True, "cron": "not-a-cron"})
+    cron_plugin.get_service()
+    check("cron 写错时回退到每周一次", _FakeCronTrigger.captured[-1] == module.WEEKLY_CRON)
+finally:
+    module.CronTrigger = _real_cron
+
+def _concurrency_of(base, value):
+    probe = module.NfoGapFill()
+    probe.init_plugin({**base, "concurrency": value})
+    return probe._concurrency
+
+
+check("并发数可从配置读入并会被限幅（1..16）",
+      _concurrency_of(defaults, "4") == 4
+      and _concurrency_of(defaults, "999") == 16
+      and _concurrency_of(defaults, "0") == 1
+      and _concurrency_of(defaults, "abc") == 4)
+check("并发数也进了默认配置（表单有这一项）",
+      "concurrency" in defaults and "'model': 'concurrency'" in form_json)
+
 # 演员上限：0 表示不限制
 cast30 = {"cast": [{"name": f"演员{i}", "character": "路人"} for i in range(30)]}
 check("演员上限 0 = 全部写入", len(module.TmdbProvider("dummy", cast_limit=0)._actors(cast30)) == 30)
