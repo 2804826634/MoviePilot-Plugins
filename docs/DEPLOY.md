@@ -138,7 +138,9 @@ docker restart moviepilot-v2
 | 剧集缩略图（单集图）没生成 | 该集必须有 NFO —— 本插件以 NFO 为扫描入口；另外它需要 TMDB API Key（宿主通道不提供剧照） |
 | 徽标 logo 没生成 | 同上，TMDB 的 logo 要直连 API；且 `image_kinds` 要含 `logo` |
 | 改了画质档后图片被整批重下 | **预期行为**：画质档位改变请求 URL，指纹随之失效。要么接受一次重下，要么先删掉 `image_manifest.json` 重新建立 |
-| 季海报只出现在一个地方 | 两处都会写：`<季目录>/poster.jpg` 与 `<剧集根目录>/seasonNN-poster.jpg`。若剧集根目录不可写会静默失败，看日志里的「备份图片失败 / 图片补齐失败」 |
+| 季海报只出现在一个地方 | **v1.7.0 起只写 `<季目录>/poster.jpg`**（一季一图、各归其位），不再往剧集根目录写 `seasonNN-poster.jpg` |
+| 剧集根目录残留一堆 `seasonNN-poster.jpg` | v1.7.0 起不再产生，但旧版写下的会留着。插件**只检测并提示、不擅自删除**（报告里显示「检测到 N 个旧版残留…」）。确认要清理可执行：`find <媒体库目录> -maxdepth 3 -name 'season*-poster.jpg' -delete` |
+| 某季在线没有海报 | **明确标注缺失**（报告里「N 季在线没有海报，已跳过」+ 明细里一条「跳过（在线无此图）」），并且**绝不回退**用剧集海报或别的季的海报顶替 |
 | 想知道某张图来自哪个 URL | 打开 `image_manifest.json`（插件数据目录内，或 CLI 的 `<root>/.nfo-backup/image_manifest.json`），按路径查 |
 
 > 图片写入采用「先写 `.nfgpart` 再原子替换」，所以不会出现媒体服务器读到半截图片的情况。

@@ -215,7 +215,13 @@ check("fanart 别名与 backdrop 内容一致", FANART.exists() and FANART.read_
 check("缺失徽标被补齐", LOGO.exists() and LOGO.read_bytes() == (IMAGES / "logo_a.png").read_bytes())
 check("剧集海报被补齐", TV_POSTER.exists() and TV_POSTER.read_bytes() == (IMAGES / "poster_a.png").read_bytes())
 check("季海报写入季目录", SEASON_POSTER.exists() and SEASON_POSTER.read_bytes() == (IMAGES / "season1.png").read_bytes())
-check("季海报同时写剧集根目录 season01-poster.jpg", SEASON_ROOT_POSTER.exists())
+check("季海报不再写剧集根目录（一季一图、各归其位）", not SEASON_ROOT_POSTER.exists(),
+      f"不应存在 {SEASON_ROOT_POSTER}")
+check("季目录里只有 poster.jpg 这一张季海报，没有 seasonNN-poster 之类的变体",
+      SEASON_POSTER.exists()
+      and not [x.name for x in SEASON_POSTER.parent.iterdir()
+               if x.name.startswith("season") and "poster" in x.name.lower()],
+      str(sorted(x.name for x in SEASON_POSTER.parent.iterdir())))
 check("单集缩略图按 <视频名>.jpg 落盘",
       EPISODE_THUMB.exists() and EPISODE_THUMB.read_bytes() == (IMAGES / "still_a.png").read_bytes())
 check("lockdata 条目连图片一起跳过", not (FIX / "电影" / "锁定测试 (2000)" / "poster.jpg").exists())

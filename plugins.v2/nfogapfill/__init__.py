@@ -70,7 +70,9 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
         光盘图 disc        电影、剧集目录 disc.png                  ← fanart.tv
         透明艺术图 clearart 电影、剧集目录 clearart.png             ← fanart.tv
         横版缩略图 landscape 电影、剧集、季目录 landscape.jpg        ← fanart.tv
-        季海报             跟随「海报」：季目录 poster.jpg，同时在剧集根目录写 seasonNN-poster.jpg
+        季海报             跟随「海报」：**只写季目录 poster.jpg**（一季一图、各归其位）
+                           不回退：该季在线没有海报就跳过并在报告里明确标注，
+                           绝不用剧集海报或别的季的海报顶替
     fanart.tv 的 API Key 自动沿用 MoviePilot 的 FANART_API_KEY（MP 自带默认值），
     语言偏好跟随 MP 的 FANART_LANG（默认 zh,en）。键名映射与 MP 的 FanartModule 一致。
     一致的判定靠 image_manifest.json 指纹清单：记录「这张图来自哪个 URL、内容 sha256」，
@@ -178,7 +180,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.6.3"
+PLUGIN_VERSION = "1.7.0"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -807,7 +809,7 @@ def write_nfo_file(nfo: NfoFile, backup_root: Optional[Path], root_dir: Path) ->
 #   命名遵循 MP / Kodi / Jellyfin 共同认可的约定（对照 MP 的
 #   app/chain/media.py 里 IMAGE_ALIASES 与季目录 naming 规则），列在这里以免写错：
 #     · 电影 / 剧集目录：poster.jpg、backdrop.jpg（+ fanart.jpg 别名）、logo.png
-#     · 季目录：poster.jpg；剧集根目录再写一份 seasonNN-poster.jpg（Kodi 约定）
+#     · 季目录：poster.jpg（只此一处；不再往剧集根目录写 seasonNN-poster.jpg）
 #     · 单集：<视频文件名>.jpg，与 MP 的写法一致，放在视频同级目录
 #   注意：TMDB 只提供 poster / backdrop / logo / still 四类；
 #   banner、clearart、discart、landscape 需要 fanart.tv，不在本插件范围内。
@@ -817,7 +819,7 @@ class ImageSpec:
     kind: str                 # poster / backdrop / logo / thumb
     name: str                 # 目标文件名模板，可用 {stem} / {season}
     alias: bool = False       # 与同 kind 的主图内容相同，只是多写一份别名文件
-    in_parent: bool = False   # 落到上级目录（Kodi 的 seasonNN-poster.jpg 约定）
+    in_parent: bool = False   # 落到上级目录（当前没有图片类型使用，保留能力备用）
 
 
 IMAGE_SPECS: Dict[str, List[ImageSpec]] = {
@@ -842,8 +844,10 @@ IMAGE_SPECS: Dict[str, List[ImageSpec]] = {
         ImageSpec("landscape", "landscape.jpg"),
     ],
     "season": [
+        # 季海报只放在**该季自己的目录**里，且统一命名为 poster.jpg。
+        # 不再往剧集根目录写 seasonNN-poster.jpg —— 那会把各季海报堆到同一个目录下
+        # （与「一季一图、各归其位」的约定相悖），用户明确要求去掉。
         ImageSpec("poster", "poster.jpg"),
-        ImageSpec("poster", "season{season:0>2}-poster.jpg", alias=True, in_parent=True),
         ImageSpec("banner", "banner.jpg"),
         ImageSpec("landscape", "landscape.jpg"),
     ],
@@ -1570,6 +1574,8 @@ class Report:
     skipped_type: int = 0         # 所在目录被 #类型 限定时跳过的条数
     scrubbed: int = 0             # 清理掉的「对象字面量」历史脏值节点数
     retried: int = 0              # 网络失败后自动重试的次数
+    images_missing: int = 0       # 在线没有对应图片、且拒绝回退的季海报数
+    legacy_alias: int = 0         # 检测到的旧版 seasonNN-poster.jpg 残留数
     unresolved: int = 0           # 拿不到在线数据
     failed: int = 0
     counts: Dict[str, int] = field(default_factory=dict)    # 差异判定统计
@@ -1621,6 +1627,11 @@ class Report:
         if self.retried:
             lines.append(f"网络抖动自动重试 {self.retried} 次"
                          f"（重试后仍失败的条目会记在下方）")
+        if self.images_missing:
+            lines.append(f"{self.images_missing} 季在线没有海报，已跳过（不回退其它季或剧集海报）")
+        if self.legacy_alias:
+            lines.append(f"检测到 {self.legacy_alias} 个旧版残留的「剧集目录/seasonNN-poster.jpg」，"
+                         f"新版只写「季目录/poster.jpg」，这些旧文件可自行删除")
         if self.counts:
             lines.append("差异判定：" + "｜".join(f"{k} {v}" for k, v in self.counts.items()))
         if self.applied:
@@ -1795,6 +1806,7 @@ class Engine:
         self.manifest = ImageManifest(cfg.manifest_path)
         self._warned_junk: set = set()      # 脏值告警去重，避免刷屏
         self._lock = threading.Lock()       # 保护 _warned_junk 等并发共享状态
+        self._legacy_seen: set = set()      # 旧版季海报残留：按剧集目录去重告警
 
     def sanitize_remote(self, field: str, values: List[str]) -> List[str]:
         """护栏：拦掉「结构化对象被 str() 出来」的脏值。
@@ -1987,6 +1999,11 @@ class Engine:
                     f"无差异 {self.report.untouched}；图片检查 {self.report.images_scanned}，"
                     f"写入 {self.report.images_written}"
                     + (f"；网络重试 {self.report.retried} 次" if self.report.retried else ""))
+        if self.report.legacy_alias:
+            logger.warning(
+                f"发现 {self.report.legacy_alias} 个旧版残留的 seasonNN-poster.jpg（剧集目录下）。"
+                f"新版只在季目录内写 poster.jpg，这些旧文件可自行删除 —— 例如："
+                f"find <媒体库> -maxdepth 3 -name 'season*-poster.jpg' -delete")
         if self.report.unresolved >= 5:
             logger.warning(
                 f"本轮有 {self.report.unresolved} 个条目取不到在线数据"
@@ -2182,8 +2199,29 @@ class Engine:
         targets = image_targets(nfo, self.cfg.image_kinds, season=season)
         if not targets:
             return 0
+        # 旧版会把季海报在剧集根目录另存一份 seasonNN-poster.jpg；新版不再写，
+        # 这里只做「检测 + 提示」，绝不擅自删除用户库里的文件
+        if nfo.media_type == "season" and season is not None:
+            try:
+                legacy = nfo.path.parent.parent / f"season{int(season):02d}-poster.jpg"
+            except (TypeError, ValueError):
+                legacy = None
+            if legacy is not None and legacy.exists():
+                self.report.bump("legacy_alias")
+                if legacy.parent not in self._legacy_seen:
+                    self._legacy_seen.add(legacy.parent)
+                    logger.warning(f"检测到旧版写法残留的季海报：{legacy} —— "
+                                   f"新版只写「季目录/poster.jpg」，这个文件可自行删除")
         urls = self.fetch_remote_images(nfo, {spec.kind for spec, _ in targets})
         if not urls:
+            # 一季可能在线什么素材都没有。以前这里直接返回什么都不记，
+            # 于是「该季海报缺失」在输出里完全看不出来 —— 现在明确标注（且绝不回退）。
+            if nfo.media_type == "season" and "poster" in self.cfg.image_kinds:
+                self.report.bump("images_missing")
+                logger.info(f"{rel}：该季在线没有任何图片素材，季目录内不会写 poster.jpg"
+                            f"（不回退其它季或剧集海报）")
+                self.__image_change(rel, "未比对", "跳过（在线无此图）",
+                                    "[图片] poster → poster.jpg", "该季缺海报，且不允许回退", "")
             return 0
 
         actionable = 0
@@ -2191,11 +2229,19 @@ class Engine:
         locked_names = {f.casefold() for f in locked} if isinstance(locked, set) else set()
         cache: Dict[str, Optional[bytes]] = {}     # 同一 URL 本轮只下载一次（别名文件共用）
         for spec, path in targets:
+            label = f"[图片] {spec.kind} → {path.name}" + ("（别名）" if spec.alias else "")
             url = urls.get(spec.kind)
             if not url:
+                # 在线没有这张图。**明确标记、绝不回退** ——
+                # 不能用「剧集海报」或「别的季的海报」来顶替某一季的海报。
+                if spec.kind == "poster" and nfo.media_type == "season":
+                    self.report.bump("images_missing")
+                    logger.info(f"{rel}：该季在线没有「海报」，未写入 {path}"
+                                f"（不回退其它季或剧集海报）")
+                    self.__image_change(rel, "未比对", "跳过（在线无此图）", label,
+                                        "该季缺海报，且不允许回退", "")
                 continue
             self.report.bump("images_scanned")
-            label = f"[图片] {spec.kind} → {path.name}" + ("（别名）" if spec.alias else "")
 
             # Kodi 的 lockdata 表示「整个条目不许改」，lockedfields 可按字段名锁单张图
             if locked is True or spec.kind.casefold() in locked_names:
@@ -2529,8 +2575,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                          "⑤ 横幅图 → banner.jpg；⑥ 光盘图 → disc.png；"
                                          "⑦ 透明艺术图 → clearart.png；⑧ 横版缩略图 → landscape.jpg。"
                                          "季目录也会写 banner.jpg 与 landscape.jpg（与剧集根目录同图）。"
-                                         "季海报不单独成项，跟随「海报」一起处理：写季目录 poster.jpg，"
-                                         "同时在剧集根目录同步一份 seasonNN-poster.jpg。"
+                                         "季海报不单独成项，跟随「海报」一起处理：**只写该季目录下的 poster.jpg**，"
+                                         "不会写到剧集根目录、也不会把各季海报堆在一起；"
+                                         "某一季在线没有海报时会明确标注缺失，绝不用其它季或剧集海报顶替。"
                                          "全部不选 = 不处理任何图片（等于关掉图片处理，不会偷偷回退成全选）。"
                                          "判定沿用与 NFO 相同的「一致才跳过」逻辑：先比对本地图与在线图，"
                                          "一致不动、不一致才替换 —— 官方「媒体库刮削」只判断文件在不在，"
