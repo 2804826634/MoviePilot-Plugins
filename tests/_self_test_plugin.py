@@ -149,10 +149,12 @@ check("图片类型选项为中文，并标注落盘文件名",
 check("图片说明里写全了 4 类落盘文件名与季海报的连带行为",
       all(name in form_json for name in
           ("poster.jpg", "backdrop.jpg", "fanart.jpg", "logo.png", "seasonNN-poster.jpg")))
-check("图片说明里写明了不支持的类型及原因（TMDB 没有，只有 fanart.tv 提供）",
-      all(name in form_json for name in
-          ("banner", "clearart", "discart", "landscape", "characterart", "fanart.tv")))
 check("图片类型默认全选", sorted(defaults["image_kinds"]) == sorted(module.IMAGE_KINDS))
+check("图片类型已扩到 8 类，且标注了数据来源（TMDB + fanart.tv）",
+      all(f"'title': '{t}'" in form_json for t in
+          ("横幅图（banner.jpg）", "光盘图（disc.png）",
+           "透明艺术图（clearart.png）", "横版缩略图（landscape.jpg）"))
+      and "fanart.tv" in form_json and "FANART_API_KEY" in form_json)
 check("演员写入上限改为下拉选项，且含「全部」",
       "'model': 'cast_limit'" in form_json
       and "'title': '全部（按 TMDB 返回的全写，NFO 会明显变大）', 'value': '0'" in form_json)
@@ -515,6 +517,81 @@ check("清理脏值只认「对象字面量」，正常片名不受影响",
       and not module.looks_like_object_repr("CG 工作室")
       and not module.looks_like_object_repr("第 3 季"))
 
+print()
+print("=" * 70)
+print("fanart.tv：光盘图 / 横幅图 / 透明艺术图 / 横版缩略图")
+print("=" * 70)
+_orig_urlopen = module.urllib.request.urlopen
+_orig_mp = module.mp_setting
+try:
+    module.mp_setting = lambda name, default=None: (
+        {"FANART_LANG": "zh,en"}.get(name, default))
+
+    check("选图优先语言偏好（zh > en），再按点赞数",
+          module.pick_fanart_image([
+              {"url": "b_en.jpg", "lang": "en", "likes": "9"},
+              {"url": "b_zh.jpg", "lang": "zh", "likes": "1"},
+              {"url": "b_jp.jpg", "lang": "jp", "likes": "99"},
+          ]) == "b_zh.jpg"
+          and module.pick_fanart_image([
+              {"url": "b_en.jpg", "lang": "en", "likes": "2"},
+              {"url": "b_pl.jpg", "lang": "pl", "likes": "99"},
+          ]) == "b_en.jpg")
+
+    payload = {
+        "moviebanner": [{"url": "http://a/b_en.jpg", "lang": "en", "likes": "5"},
+                        {"url": "http://a/b_zh.jpg", "lang": "zh", "likes": "1"}],
+        "moviedisc": [{"url": "http://a/d1.png", "lang": "00", "likes": "9"}],
+    }
+
+    class _FakeFanart:
+        def __init__(self, data):
+            self._data = data
+
+        def read(self):
+            return json.dumps(self._data).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = getattr(request, "full_url", "")
+        return _FakeFanart(payload)
+
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        urls = module.fanart_image_urls({"banner", "disc", "clearart"}, "812", "", "KEY")
+    finally:
+        module.urllib.request.urlopen = _orig_urlopen
+    check("电影按 tmdbid 查询，横幅优先中文、光盘取唯一一张",
+          urls.get("banner") == "http://a/b_zh.jpg" and urls.get("disc") == "http://a/d1.png"
+          and "clearart" not in urls, str(urls))
+    check("请求地址指向 fanart.tv 的电影接口并带上 Key",
+          "/v3/movies/812?api_key=KEY" in captured.get("url", ""), captured.get("url", ""))
+
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        urls_tv = module.fanart_image_urls({"banner"}, "", "355730", "KEY")
+    finally:
+        module.urllib.request.urlopen = _orig_urlopen
+    check("剧集按 thetvdb id 查询", "/v3/tv/355730?api_key=KEY" in captured.get("url", "")
+          and urls_tv.get("banner") == "http://a/b_zh.jpg", captured.get("url", ""))
+
+    check("没有 Key 时不发请求、返回空",
+          module.fanart_image_urls({"banner", "disc"}, "812", "", "") == {})
+    check("剧集既没有 tvdbid 也没有 tmdbid 时不发请求",
+          module.fanart_image_urls({"banner"}, "", "", "KEY") == {})
+    check("不需要 fanart 的类型（如海报）不会触发查询",
+          module.fanart_image_urls({"poster"}, "812", "", "KEY") == {})
+finally:
+    module.mp_setting = _orig_mp
+check("恢复后语言偏好回到默认 zh,en", module.fanart_lang_order() == ["zh", "en"])
+
 # 演员上限：0 表示不限制
 cast30 = {"cast": [{"name": f"演员{i}", "character": "路人"} for i in range(30)]}
 check("演员上限 0 = 全部写入", len(module.TmdbProvider("dummy", cast_limit=0)._actors(cast30)) == 30)
@@ -624,9 +701,20 @@ check("未知画质档回退 standard", module.image_size_for("bogus", "poster")
 movie_nfo = module.load_nfo(FIX / "电影" / "星际穿越 (2014)" / "movie.nfo")
 movie_targets = {(spec.kind, spec.name) for spec, _ in
                  module.image_targets(movie_nfo, set(module.IMAGE_KINDS))}
-check("电影图片目标 = poster / backdrop / fanart / logo",
+check("电影图片目标 = poster / backdrop / fanart / logo + 新增 4 类",
       movie_targets == {("poster", "poster.jpg"), ("backdrop", "backdrop.jpg"),
-                        ("backdrop", "fanart.jpg"), ("logo", "logo.png")})
+                        ("backdrop", "fanart.jpg"), ("logo", "logo.png"),
+                        ("banner", "banner.jpg"), ("disc", "disc.png"),
+                        ("clearart", "clearart.png"), ("landscape", "landscape.jpg")})
+check("新增类型默认全选（8 类都在 IMAGE_KINDS 里）",
+      len(module.IMAGE_KINDS) == 8
+      and set(module.IMAGE_KINDS) == {"poster", "backdrop", "logo", "thumb",
+                                      "banner", "disc", "clearart", "landscape"})
+check("fanart 键名映射与 MoviePilot 的 FanartModule 一致",
+      module.FANART_KEYS["banner"] == ("moviebanner", "tvbanner")
+      and module.FANART_KEYS["disc"] == ("moviedisc",)
+      and "hdmovieclearart" in module.FANART_KEYS["clearart"]
+      and "moviethumb" in module.FANART_KEYS["landscape"])
 season_tree = ET.ElementTree(ET.fromstring("<season><season>1</season></season>"))
 season_nfo = module.NfoFile(path=Path("电视剧") / "怪奇物语 (2016)" / "Season 01" / "season.nfo",
                             media_type="season", tree=season_tree)
