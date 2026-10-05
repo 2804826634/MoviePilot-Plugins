@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.4.2-blue)
+![version](https://img.shields.io/badge/version-1.4.3-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -325,7 +325,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 57 项断言（含图片补齐/别名/指纹幂等/#类型限定）
-python tests/_self_test_plugin.py   # 插件面 120 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离）
+python tests/_self_test_plugin.py   # 插件面 126 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
@@ -386,12 +386,23 @@ Jellyfin 读 `<director>` 时还会**按逗号拆分**多值字段，所以一�
 
 ### 已经被写坏的文件怎么修
 
-不用手工改。升级到 v1.4.1 后，用 `模式 = 不一致则替换`（`sync`，默认就是它）跑一轮即可：
+不用手工改。升级到 **v1.4.3 或以上**，用 `模式 = 不一致则替换`（`sync`，默认就是它）跑一轮即可：
 
-本地是脏值、在线是干净名字 → 判定「不一致」→ 直接替换掉。
+v1.4.3 起会主动识别并清除这类脏值 —— 只要某个字段里存在「对象字面量」形态的值，
+就强制整段重写一遍（即使其余内容与在线一致），并把这些脏值一并清掉。
+报告里会写明「清理历史脏值 N 处」。
+
+两个特别注意点：
+
+- 脏值可能**不只在 `<studio>`**：也会扫描同义标签 `<network>` 里的脏值（媒体服务器常把两者算作同一栏）。
+- 在线取不到该字段时**只精准删掉脏值**，不会因为整段重写而丢掉同一字段里的正常内容。
 
 顺带会清掉旧版本可能留下的**空演员节点**（在媒体服务器里会显示成一个空白人物）。
 跑完让媒体服务器刷新一下元数据即可。
+
+> 顺便澄清一点：MoviePilot **自己**的 NFO 生成代码是正确的
+> （`app/modules/themoviedb/scraper.py` 里是 `company.get("name")` 取名字，且不写 `<network>`），
+> 所以这些 dict 脏值确定来自本插件 v1.4.1 之前的版本，不是 MP 写坏的。
 
 ---
 

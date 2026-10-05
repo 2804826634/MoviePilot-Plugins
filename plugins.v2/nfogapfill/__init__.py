@@ -174,7 +174,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.4.2"
+PLUGIN_VERSION = "1.4.3"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
@@ -480,6 +480,32 @@ def looks_like_object_repr(text: str) -> bool:
     return ("': " in stripped or "\": " in stripped) and "{" in stripped
 
 
+# 同义标签：同一个概念在 NFO 里可能落在不同标签下（例如出品方既可能是 <studio>
+# 也可能是 <network>），媒体服务器往往把两者都算作同一栏。
+# 替换某个字段时顺手清掉这些标签里的历史脏值 —— 但**只删脏值**，正常值一律不动，
+# 也不把它们纳入比对（否则两边永远对不上，会陷入反复重写）。
+SYNONYM_TAGS: Dict[str, Tuple[str, ...]] = {
+    "studio": ("network",),
+}
+
+
+def purge_junk_elements(root: ET.Element, tags: Tuple[str, ...]) -> int:
+    """删掉这些标签里「像对象字面量」的脏节点，返回删除数量。只删脏值，正常值不动。"""
+    removed = 0
+    for tag in tags:
+        for el in list(root.findall(tag)):
+            if looks_like_object_repr(el.text or ""):
+                root.remove(el)
+                removed += 1
+    return removed
+
+
+def count_junk_elements(root: ET.Element, tags: Tuple[str, ...]) -> int:
+    """数一下这些标签里有多少「像对象字面量」的脏节点（不修改文档）。"""
+    return sum(1 for tag in tags for el in root.findall(tag)
+               if looks_like_object_repr(el.text or ""))
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 差异比对
 # ══════════════════════════════════════════════════════════════════════
@@ -585,8 +611,11 @@ def get_locked_fields(root: ET.Element) -> Optional[bool]:
     return fields if fields else None
 
 
-def write_local_values(nfo: NfoFile, name: str, new_values: List[str], replace: bool) -> None:
-    """写回字段。replace=True 时先清空该字段的全部旧节点再重建（保持元素顺序可接受）。"""
+def write_local_values(nfo: NfoFile, name: str, new_values: List[str], replace: bool) -> int:
+    """写回字段。replace=True 时先清空该字段的全部旧节点再重建（保持元素顺序可接受）。
+
+    返回「顺带清掉的历史脏值节点数」——替换时会把同义标签里的对象字面量垃圾一并扫掉。
+    """
     root = nfo.root
     if name == "actor":
         if replace:
@@ -609,14 +638,15 @@ def write_local_values(nfo: NfoFile, name: str, new_values: List[str], replace: 
                 ET.SubElement(el, "role").text = parts[1]
             if len(parts) > 2 and parts[2]:
                 ET.SubElement(el, "thumb").text = parts[2]
-        return
+        return 0
 
     if replace:
         for el in list(root.findall(name)):
             root.remove(el)
         for value in new_values:
             ET.SubElement(root, name).text = value
-        return
+        # 同义标签（例如 studio 与 network）里的历史脏值也一并清掉，正常值不动
+        return purge_junk_elements(root, SYNONYM_TAGS.get(name, ()))
 
     # 补齐模式：优先填已存在的空节点，多余的新值再追加，避免产生重复标签
     empties = [el for el in root.findall(name) if not norm_text(el.text)]
@@ -626,6 +656,7 @@ def write_local_values(nfo: NfoFile, name: str, new_values: List[str], replace: 
         el.text = new_values.pop(0)
     for value in new_values:
         ET.SubElement(root, name).text = value
+    return 0
 
 
 def write_nfo_file(nfo: NfoFile, backup_root: Optional[Path], root_dir: Path) -> None:
@@ -1336,6 +1367,7 @@ class Report:
     changed_files: int = 0        # 实际写入了几个文件
     skipped_locked: int = 0
     skipped_type: int = 0         # 所在目录被 #类型 限定时跳过的条数
+    scrubbed: int = 0             # 清理掉的「对象字面量」历史脏值节点数
     unresolved: int = 0           # 拿不到在线数据
     failed: int = 0
     counts: Dict[str, int] = field(default_factory=dict)    # 差异判定统计
@@ -1361,6 +1393,9 @@ class Report:
         ]
         if self.skipped_type:
             lines.append(f"按目录的「#类型」限定跳过 {self.skipped_type} 个 NFO（类型不符）")
+        if self.scrubbed:
+            lines.append(f"清理历史脏值 {self.scrubbed} 处"
+                         f"（早期版本把结构化对象写成 Python 字面量留下的）")
         if self.counts:
             lines.append("差异判定：" + "｜".join(f"{k} {v}" for k, v in self.counts.items()))
         if self.applied:
@@ -1628,12 +1663,28 @@ class Engine:
             logger.warning(f"取不到在线数据，保持原样：{rel}（{source}）")
             return
 
-        plan: List[Tuple[str, bool]] = []      # (字段名, 是否整体替换)
+        plan: List[Tuple[str, bool, List[str]]] = []   # (字段名, 是否整体替换, 要写入的值)
         for name in managed:
             kind = FIELD_KINDS.get(name, "text")
-            local_vals = read_local_values(nfo, name)
+            local_raw = read_local_values(nfo, name)
+            # 本地遗留的对象字面量脏值不能算「内容」—— 它们会被媒体服务器显示成乱码
+            junk_local = [v for v in local_raw if looks_like_object_repr(v)]
+            local_vals = [v for v in local_raw if not looks_like_object_repr(v)]
             remote_vals = self.sanitize_remote(name, to_str_list(remote.get(name)))
-            verdict, action = compare(kind, local_vals, remote_vals)
+
+            junk_syn = count_junk_elements(nfo.root, SYNONYM_TAGS.get(name, ()))
+            if junk_local or junk_syn:
+                # 即使去掉脏值后与在线一致，也必须整体重写一遍才能清掉它们（否则会永远留着）。
+                # 在线没数据时就用本地剩下的正常值重写，避免把正常内容一起清空。
+                verdict, action = DIFF, REPLACE
+                write_vals = remote_vals or local_vals
+                self.report.scrubbed += len(junk_local)
+                logger.info(f"{rel}：{name} 有 {len(junk_local) + junk_syn} 处历史脏值"
+                            f"（同义标签 {junk_syn} 处），将整体重写清除")
+            else:
+                verdict, action = compare(kind, local_vals, remote_vals)
+                write_vals = remote_vals
+
             self.report.counts[verdict] = self.report.counts.get(verdict, 0) + 1
             if action == SKIP:
                 continue
@@ -1658,7 +1709,7 @@ class Engine:
                 self.report.skipped_locked += 1
             self.record(rel, nfo.media_type, name, verdict, applied, local_vals, remote_vals)
             if do_write:
-                plan.append((name, action == REPLACE))
+                plan.append((name, action == REPLACE, write_vals))
 
         pending_images = self.process_images(nfo, rel, root_dir)
 
@@ -1672,8 +1723,13 @@ class Engine:
         if not plan:
             return
 
-        for name, replace in plan:
-            write_local_values(nfo, name, to_str_list(remote.get(name)), replace=replace)
+        # 注意：写入用比对/过滤之后的值，绝不能再去 remote 里取原始值 ——
+        # 那样护栏就形同虚设（早期版本正是这里又把脏值写了回去）
+        for name, replace, values in plan:
+            scrubbed = write_local_values(nfo, name, values, replace=replace)
+            if scrubbed:
+                self.report.scrubbed += scrubbed
+                logger.info(f"{rel}：{name} 顺带清掉 {scrubbed} 处同义标签里的历史脏值")
         write_nfo_file(nfo, (self.cfg.backup_dir if self.cfg.backup else None), root_dir)
         self.report.changed_files += 1
         logger.info(f"已更新 {rel}：{', '.join(p[0] for p in plan)}")

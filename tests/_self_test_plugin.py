@@ -452,6 +452,69 @@ empty = FlakyOpener(0, payload=b"")
 check("响应为空也算失败（不会写出 0 字节图片）",
       module.download_bytes("https://x/y.png", empty, attempts=1) is None)
 
+print()
+print("=" * 70)
+print("回归：本地残留的「对象字面量」脏值必须被清掉（工作室那栏的现象）")
+print("=" * 70)
+JUNK_A = "{'id': 3756, 'logo_path': '/x.png', 'name': 'CoMix Wave Films', 'origin_country': 'JP'}"
+JUNK_B = "{'id': 128616, 'name': 'Story', 'origin_country': 'JP'}"
+
+studio_root = DATA_PATH / "studiolib"
+movie_dir = studio_root / "电影" / "某片 (2023)"
+movie_dir.mkdir(parents=True, exist_ok=True)
+studio_nfo = movie_dir / "movie.nfo"
+
+strip_cache = DATA_PATH / "studio_cache.json"
+strip_cache.write_text(json.dumps({"movie:997": {
+    "title": ["某片"], "year": ["2023"],
+    "studio": ["CoMix Wave Films", "Story", "KADOKAWA"],
+}}, ensure_ascii=False), encoding="utf-8")
+nostudio_cache = DATA_PATH / "studio_cache_none.json"
+nostudio_cache.write_text(json.dumps({"movie:997": {
+    "title": ["某片"], "year": ["2023"],
+}}, ensure_ascii=False), encoding="utf-8")
+
+
+def run_studio(body, tag, cache=None):
+    studio_nfo.write_text(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<movie>\n'
+        '  <title>某片</title>\n  <year>2023</year>\n  <tmdbid>997</tmdbid>\n'
+        + body + "</movie>\n", encoding="utf-8")
+    report = module.Engine(
+        module.EngineConfig(roots=[studio_root], mode="sync",
+                            manifest_path=DATA_PATH / f"studio_{tag}.json"),
+        module.FileProvider(str(cache or strip_cache))).run()
+    return studio_nfo.read_text(encoding="utf-8"), report
+
+
+# 场景 A：干净名字与脏字典并存 —— 正是用户截图里的样子
+CLEAN3 = ("  <studio>CoMix Wave Films</studio>\n  <studio>Story</studio>\n"
+          "  <studio>KADOKAWA</studio>\n")
+after_a, rep_a = run_studio(CLEAN3 + f"  <studio>{JUNK_A}</studio>\n  <studio>{JUNK_B}</studio>\n", "a")
+check("场景A：脏 studio 被清掉，只留干净名字",
+      after_a.count("<studio>") == 3 and "{'id'" not in after_a
+      and "CoMix Wave Films" in after_a, after_a)
+check("场景A：清理数量记进了报告", rep_a.scrubbed >= 2, f"scrubbed={rep_a.scrubbed}")
+
+# 场景 B：脏值藏在同义标签 <network> 里，studio 本身是干净的（会被判为「一致」而跳过）
+after_b, rep_b = run_studio(CLEAN3 + f"  <network>{JUNK_A}</network>\n", "b")
+check("场景B：同义标签 <network> 里的脏值也被清掉",
+      "<network>" not in after_b and "{'id'" not in after_b, after_b)
+check("场景B：干净的 studio 一个不多一个不少", after_b.count("<studio>") == 3, after_b)
+
+# 场景 C：在线没有这个字段时，只清脏值，不能把正常内容一起清空
+after_c, _ = run_studio(
+    "  <studio>CoMix Wave Films</studio>\n  <studio>保留我</studio>\n"
+    f"  <studio>{JUNK_B}</studio>\n", "c", cache=nostudio_cache)
+check("场景C：脏值清掉、正常值保留（不会因为整体重写而丢内容）",
+      "{'id'" not in after_c and "CoMix Wave Films" in after_c
+      and "保留我" in after_c and after_c.count("<studio>") == 2, after_c)
+
+check("清理脏值只认「对象字面量」，正常片名不受影响",
+      not module.looks_like_object_repr("Knives Out")
+      and not module.looks_like_object_repr("CG 工作室")
+      and not module.looks_like_object_repr("第 3 季"))
+
 # 演员上限：0 表示不限制
 cast30 = {"cast": [{"name": f"演员{i}", "character": "路人"} for i in range(30)]}
 check("演员上限 0 = 全部写入", len(module.TmdbProvider("dummy", cast_limit=0)._actors(cast30)) == 30)
