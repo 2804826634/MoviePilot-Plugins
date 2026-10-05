@@ -1,0 +1,9 @@
+# 源码统一 LF：MoviePilot 会直接下载 raw 文件，CRLF 可能在 Linux 容器里出问题
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
