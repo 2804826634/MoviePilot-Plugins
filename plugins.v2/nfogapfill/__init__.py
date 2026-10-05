@@ -178,7 +178,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.6.0"
+PLUGIN_VERSION = "1.6.1"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -1660,6 +1660,20 @@ def find_tmdb_id(root: ET.Element, media_type: str) -> Tuple[Optional[str], str]
     return None, "NFO 内无 TMDB 标识"
 
 
+def title_year_from_dir(name: str) -> Tuple[Optional[str], Optional[str]]:
+    """从目录名里猜「标题 + 年份」：「藏海传 (2025)」→ ("藏海传", "2025")。"""
+    match = re.search(r"[\(\[]((?:19|20)\d{2})[\)\]]", name or "")
+    year = match.group(1) if match else None
+    title = re.sub(r"[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]", "", name or "").strip(" -_·") or None
+    return title, year
+
+
+def tmdb_id_from_dir(name: str) -> Optional[str]:
+    """从目录名里读 MP 整理后的 tmdbid，例如「藏海传 (2025) {tmdbid=252640}」。"""
+    match = re.search(r"tmdbid\s*[=\-:]\s*(\d+)", name or "", re.I)
+    return match.group(1) if match else None
+
+
 def guess_title_year(nfo: NfoFile) -> Tuple[Optional[str], Optional[str]]:
     root = nfo.root
     title = norm_text(root.findtext("title"))
@@ -1669,10 +1683,9 @@ def guess_title_year(nfo: NfoFile) -> Tuple[Optional[str], Optional[str]]:
         name = nfo.path.parent.name
         if name.casefold().startswith("season"):
             name = nfo.path.parent.parent.name
-        match = re.search(r"[\(\[]((?:19|20)\d{2})[\)\]]", name)
-        if match:
-            year = year or match.group(1)
-        title = re.sub(r"[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]", "", name).strip(" -_·") or None
+        dir_title, dir_year = title_year_from_dir(name)
+        year = year or dir_year
+        title = dir_title
     return title, year
 
 
@@ -1712,11 +1725,7 @@ class Engine:
         root = nfo.root
         mtype = nfo.media_type
 
-        tmdb_id, source = find_tmdb_id(root, mtype)
-        if mtype in ("tvshow", "season", "episodedetails") and not tmdb_id:
-            tmdb_id, source = self._find_show_id(nfo)
-        if mtype == "movie" and not tmdb_id:
-            tmdb_id, source = self._search_id(nfo, is_tv=False)
+        tmdb_id, source = self.resolve_tmdb_id(nfo)
         if not tmdb_id:
             return {}, source
 
@@ -1741,8 +1750,34 @@ class Engine:
         match = re.search(pattern, nfo.path.name, re.I)
         return match.group(1) if match else None
 
+    def resolve_tmdb_id(self, nfo: NfoFile) -> Tuple[Optional[str], str]:
+        """确定「该用哪个 TMDB id」—— 这里有个极易踩、后果很严重的坑：
+
+        - **电影**：NFO 里的 `<tmdbid>` 就是电影 id ✓
+        - **剧集**：tvshow.nfo 里的 `<tmdbid>` 就是剧集 id ✓
+        - **季 / 单集**：NFO 里的 `<tmdbid>` 是「这一季 / 这一集自己的 id」，
+          而 TMDB 的 season / episode 接口要的是**剧集 id**。直接拿单集 id 去查必然 404 ——
+          表现就是整个库的单集全部「取不到在线数据，保持原样」。这两类必须向上取剧集 id。
+        """
+        mtype = nfo.media_type
+        if mtype in ("season", "episodedetails"):
+            return self._find_show_id(nfo)
+        found = find_tmdb_id(nfo.root, mtype)
+        if found[0]:
+            return found
+        if mtype == "tvshow":
+            return self._find_show_id(nfo)
+        # 电影：NFO 没写 tmdbid 时，先看目录名里有没有 {tmdbid=xxx}，再退回按标题搜索
+        from_dir = tmdb_id_from_dir(nfo.path.parent.name)
+        if from_dir:
+            return from_dir, "目录名里的 tmdbid"
+        return self._search_id(nfo, is_tv=False)
+
     def _find_show_id(self, nfo: NfoFile) -> Tuple[Optional[str], str]:
-        """单集/季 NFO 自己没有剧集 id 时，向上找同级 tvshow.nfo。"""
+        """单集/季 NFO 取「剧集 id」：先向上找 tvshow.nfo，再退到剧集目录名。
+
+        **绝不能拿单集自己的 <tmdbid> 兜底** —— 那是单集 id，拿去查 season/episode 必然 404。
+        """
         current = nfo.path.parent
         for _ in range(4):
             current = current.parent
@@ -1752,10 +1787,24 @@ class Engine:
                 if loaded:
                     found = find_tmdb_id(loaded.root, "tvshow")
                     if found[0]:
-                        return found[0], f"同剧 tvshow.nfo"
+                        return found[0], "同剧 tvshow.nfo"
             if current == current.parent:
                 break
-        return None, "未找到剧集 TMDB 标识"
+
+        # 没有可用的 tvshow.nfo：退到「剧集目录」
+        show_dir = nfo.path.parent
+        if show_dir.name.casefold().startswith("season"):
+            show_dir = show_dir.parent
+        # MP 整理后的目录名常带 {tmdbid=xxx}（例如「藏海传 (2025) {tmdbid=252640}」）
+        from_dir = tmdb_id_from_dir(show_dir.name)
+        if from_dir:
+            return from_dir, "剧集目录名里的 tmdbid"
+        title, year = title_year_from_dir(show_dir.name)
+        if title and hasattr(self.provider, "search"):
+            found = self.provider.search(title, year, True)
+            if found:
+                return found, f"按剧集目录名搜索「{title}」{year or ''}".strip()
+        return None, "未找到剧集 TMDB 标识（建议给 tvshow.nfo 补上 tmdbid）"
 
     def _search_id(self, nfo: NfoFile, is_tv: bool) -> Tuple[Optional[str], str]:
         title, year = guess_title_year(nfo)
@@ -1824,6 +1873,33 @@ class Engine:
                     f"写入 {self.report.images_written}")
         return self.report
 
+    def scrub_when_unresolved(self, nfo: NfoFile, rel: str, root_dir: Path,
+                              fields: List[str], locked: Optional[bool],
+                              locked_names: set) -> None:
+        """拿不到在线数据时，也要把文件里的历史脏值清掉。
+
+        以前这里直接 return —— 于是「在线取不到 + 本地有脏值」的条目会永远留着
+        `{'id': 12, 'name': '冒险'}` 这种乱码，用户会觉得「升级了也修不好」。
+        脏值不是内容，删它不会丢任何信息（同标签里的正常值一律保留）。
+        """
+        tags = [(name,) + SYNONYM_TAGS.get(name, ())
+                for name in fields if name.casefold() not in locked_names]
+        total = sum(count_junk_elements(nfo.root, group) for group in tags)
+        if not total:
+            return
+        if self.cfg.mode == "report" or self.cfg.dry_run:
+            logger.info(f"[预演] {rel}：将清理 {total} 处历史脏值（本次不写盘）")
+            return
+        if locked is True:
+            logger.warning(f"{rel}：条目被 <lockdata> 锁定，但其中的历史脏值是本插件旧版写坏的，"
+                           f"仍会清理（原文件已备份）")
+        removed = sum(purge_junk_elements(nfo.root, group) for group in tags)
+        if removed:
+            self.report.bump("scrubbed", removed)
+            self.report.bump("changed_files")
+            logger.info(f"{rel}：清理历史脏值 {removed} 处（本条目取不到在线数据）")
+            write_nfo_file(nfo, (self.cfg.backup_dir if self.cfg.backup else None), root_dir)
+
     def forced_type(self, root: Path) -> Optional[str]:
         """该目录是否被 #电影 / #电视剧 限定了类型；没限定返回 None。"""
         if not self.cfg.root_types:
@@ -1869,6 +1945,8 @@ class Engine:
             self.report.bump("unresolved")
             self.report.add_error(f"{rel}：{source}")
             logger.warning(f"取不到在线数据，保持原样：{rel}（{source}）")
+            # 字段本身没法比对，但历史脏值仍然要清 —— 否则这类条目会永远带着乱码
+            self.scrub_when_unresolved(nfo, rel, root_dir, managed, locked, locked_names)
             return
 
         plan: List[Tuple[str, bool, List[str]]] = []   # (字段名, 是否整体替换, 要写入的值)
@@ -1881,7 +1959,8 @@ class Engine:
             remote_vals = self.sanitize_remote(name, to_str_list(remote.get(name)))
 
             junk_syn = count_junk_elements(nfo.root, SYNONYM_TAGS.get(name, ()))
-            if junk_local or junk_syn:
+            is_purge = bool(junk_local or junk_syn)
+            if is_purge:
                 # 即使去掉脏值后与在线一致，也必须整体重写一遍才能清掉它们（否则会永远留着）。
                 # 在线没数据时就用本地剩下的正常值重写，避免把正常内容一起清空。
                 verdict, action = DIFF, REPLACE
@@ -1898,11 +1977,21 @@ class Engine:
                 continue
 
             is_locked = locked is True or name.casefold() in locked_names
-            if is_locked:
+            if is_locked and not is_purge:
                 applied, do_write = "跳过（NFO 字段锁定）", False
             elif self.cfg.mode == "report":
                 # 带上「应为……」是为了让详情页在只报告模式下也能显示「将要修改哪些文件」
                 applied, do_write = f"仅报告（应为{action}）", False
+            elif is_purge:
+                # 脏值不是「内容」：gapfill（只补缺失）、「保护字段」、乃至 <lockdata> 锁
+                # 都不该挡住清理 —— 这些脏值本来就是本插件旧版写坏的，
+                # 锁保护的是用户/其它工具的内容，不该保护我们自己的 bug 产物。
+                # 写盘前会照常备份。
+                applied = "清理脏值（条目被锁定）" if is_locked else "清理脏值"
+                do_write = True
+                if is_locked:
+                    logger.warning(f"{rel}：{name} 含历史脏值（本插件旧版写坏的），"
+                                   f"即使条目被锁定也一并清理，原文件已备份")
             elif self.cfg.mode == "gapfill" and action == REPLACE:
                 applied, do_write = "跳过（gapfill 只补缺失）", False
             elif self.cfg.mode != "force" and action == REPLACE and name in self.cfg.protect_fields:
@@ -1913,7 +2002,7 @@ class Engine:
                 applied, do_write = REPLACE, True
 
             self.report.tally("applied", applied)
-            if is_locked:
+            if is_locked and not do_write:
                 self.report.bump("skipped_locked")
             self.record(rel, nfo.media_type, name, verdict, applied, local_vals, remote_vals)
             if do_write:
@@ -1948,11 +2037,7 @@ class Engine:
             return {}
         root = nfo.root
         mtype = nfo.media_type
-        tmdb_id, _ = find_tmdb_id(root, mtype)
-        if mtype in ("tvshow", "season", "episodedetails") and not tmdb_id:
-            tmdb_id, _ = self._find_show_id(nfo)
-        if mtype == "movie" and not tmdb_id:
-            tmdb_id, _ = self._search_id(nfo, is_tv=False)
+        tmdb_id, _ = self.resolve_tmdb_id(nfo)
         if not tmdb_id:
             return {}
         season = episode = None
