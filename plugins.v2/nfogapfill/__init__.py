@@ -178,7 +178,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.6.1"
+PLUGIN_VERSION = "1.6.2"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -1668,6 +1668,34 @@ def title_year_from_dir(name: str) -> Tuple[Optional[str], Optional[str]]:
     return title, year
 
 
+def season_from_dir(name: str) -> Optional[str]:
+    """从目录名里取季号：「Season 01」/「S01」/「第 1 季」/「第一季」→ "1"。
+
+    **season.nfo 这种文件名里根本没有季号** —— 季号只能从上级目录名取，
+    只看文件名必然得到「无法确定季号」。
+    """
+    text = str(name or "").strip()
+    # 「S01E01」「1x02」这种是单集命名，不是季目录 —— 宁可不猜，
+    # 也不能把别的季的元数据写进 NFO
+    if re.search(r"s\d{1,3}\s*e\d{1,3}", text, re.I) or re.search(r"(?:^|\D)\d{1,2}x\d", text):
+        return None
+    # 花絮/特典按惯例是第 0 季（Kodi / Jellyfin 都这么放）
+    if re.search(r"specials?(?:$|[\s._-])", text, re.I) or "特别篇" in text or "特典" in text:
+        return "0"
+    patterns = (
+        r"(?:season|s)\s*0*(\d{1,3})(?!\d)",       # Season 01 / S01 / season1
+        r"第\s*0*(\d{1,3})\s*季",                   # 第 1 季 / 第01季
+        r"(?:^|\D)(\d{1,3})\s*季(?![节])",           # 1 季
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            number = int(match.group(1))
+            if 0 <= number <= 100:
+                return str(number)
+    return None
+
+
 def tmdb_id_from_dir(name: str) -> Optional[str]:
     """从目录名里读 MP 整理后的 tmdbid，例如「藏海传 (2025) {tmdbid=252640}」。"""
     match = re.search(r"tmdbid\s*[=\-:]\s*(\d+)", name or "", re.I)
@@ -1734,14 +1762,13 @@ class Engine:
         if mtype == "tvshow":
             return self.provider.fetch_tvshow(tmdb_id), f"tmdb:{tmdb_id}（{source}）"
         if mtype == "season":
-            season = norm_text(root.findtext("season")) or self._from_name(nfo, r"S(\d+)")
+            season, _ = self.resolve_season_episode(nfo, mtype)
             if not season:
-                return {}, "无法确定季号"
+                return {}, "无法确定季号（NFO 里没有 <season>，目录名里也没写「Season 01」这类信息）"
             return self.provider.fetch_season(tmdb_id, season), f"tmdb:{tmdb_id} 第 {season} 季"
-        season = norm_text(root.findtext("season")) or self._from_name(nfo, r"S(\d+)")
-        episode = norm_text(root.findtext("episode")) or self._from_name(nfo, r"E(\d+)")
+        season, episode = self.resolve_season_episode(nfo, mtype)
         if not (season and episode):
-            return {}, "无法确定季/集号"
+            return {}, f"无法确定季/集号（季={season or '?'} 集={episode or '?'}）"
         return (self.provider.fetch_episode(tmdb_id, season, episode),
                 f"tmdb:{tmdb_id} S{season}E{episode}")
 
@@ -1749,6 +1776,26 @@ class Engine:
     def _from_name(nfo: NfoFile, pattern: str) -> Optional[str]:
         match = re.search(pattern, nfo.path.name, re.I)
         return match.group(1) if match else None
+
+    def resolve_season_episode(self, nfo: NfoFile,
+                               mtype: str) -> Tuple[Optional[str], Optional[str]]:
+        """确定季号 / 集号：NFO 标签 → **上级目录名** → 文件名。
+
+        以前只从「文件名」兜底 —— 而 `season.nfo` 里没有任何季号信息（名字就叫 season.nfo），
+        于是整季被判定为「无法确定季号」直接跳过。季号其实写在**上级目录名**里（Season 01）。
+        """
+        root = nfo.root
+        season = norm_text(root.findtext("season"))
+        episode = norm_text(root.findtext("episode"))
+        if not season:
+            season = (season_from_dir(nfo.path.parent.name)
+                      or season_from_dir(nfo.path.parent.parent.name))
+        if not season:
+            # 文件名兜底：S01E02 / 1x02
+            season = self._from_name(nfo, r"S(\d+)") or self._from_name(nfo, r"(\d+)x\d+")
+        if mtype == "episodedetails" and not episode:
+            episode = self._from_name(nfo, r"E(\d+)") or self._from_name(nfo, r"\dx(\d+)")
+        return season, episode
 
     def resolve_tmdb_id(self, nfo: NfoFile) -> Tuple[Optional[str], str]:
         """确定「该用哪个 TMDB id」—— 这里有个极易踩、后果很严重的坑：
@@ -2042,9 +2089,7 @@ class Engine:
             return {}
         season = episode = None
         if mtype in ("season", "episodedetails"):
-            season = norm_text(root.findtext("season")) or self._from_name(nfo, r"S(\d+)")
-        if mtype == "episodedetails":
-            episode = norm_text(root.findtext("episode")) or self._from_name(nfo, r"E(\d+)")
+            season, episode = self.resolve_season_episode(nfo, mtype)
         try:
             return self.provider.fetch_images(tmdb_id, mtype, season=season,
                                               episode=episode, kinds=kinds) or {}

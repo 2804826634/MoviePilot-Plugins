@@ -604,6 +604,52 @@ check("② 来源标注可读", "目录名" in user_src, user_src)
 
 print()
 print("=" * 70)
+print("回归：season.nfo 的季号只能从目录名取（用户日志「无法确定季号」）")
+print("=" * 70)
+check("目录名解析季号：Season 01 / S01 / 第 1 季 等写法都认",
+      module.season_from_dir("Season 01") == "1"
+      and module.season_from_dir("S01") == "1"
+      and module.season_from_dir("season 3") == "3"
+      and module.season_from_dir("第 1 季") == "1"
+      and module.season_from_dir("第01季") == "1"
+      and module.season_from_dir("1 季") == "1", str(module.season_from_dir("Season 01")))
+check("认不出季号的目录名不会瞎猜",
+      module.season_from_dir("电影") is None
+      and module.season_from_dir("Specials") in (None, "0")
+      and module.season_from_dir("Se7en") is None
+      and module.season_from_dir("") is None
+      and module.season_from_dir("S01E01") is None)   # 文件名的形态不该被当目录名
+check("花絮/特典目录按惯例归到第 0 季",
+      module.season_from_dir("Specials") == "0"
+      and module.season_from_dir("特别篇") == "0"
+      and module.season_from_dir("特典") == "0")
+check("带后缀的季目录也能认（Season 1 - 1080p）",
+      module.season_from_dir("Season 1 - 1080p") == "1")
+
+# 复现用户结构：国产剧/潜伏 (2009) {tmdbid=21712}/Season 01/season.nfo，且 NFO 里没有 <season>
+latent = DATA_PATH / "dirid" / "国产剧" / "潜伏 (2009) {tmdbid=21712}" / "Season 01"
+latent.mkdir(parents=True, exist_ok=True)
+latent_nfo = latent / "season.nfo"
+latent_nfo.write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<season>\n'
+    '  <title>第 1 季</title>\n</season>\n', encoding="utf-8")
+latent_cache = DATA_PATH / "latent_cache.json"
+latent_cache.write_text(json.dumps({"season:21712:1": {
+    "title": ["第 1 季"], "plot": ["剧情简介"], "premiered": ["2009-04-01"], "season": ["1"],
+}}, ensure_ascii=False), encoding="utf-8")
+latent_rep = module.Engine(
+    module.EngineConfig(roots=[DATA_PATH / "dirid"], mode="sync",
+                        manifest_path=DATA_PATH / "latent_manifest.json"),
+    module.FileProvider(str(latent_cache))).run()
+after_latent = latent_nfo.read_text(encoding="utf-8")
+check("① season.nfo 没写 <season> 时，从上级目录「Season 01」取到季号并补齐",
+      "<season>1</season>" in after_latent.replace(" ", ""), after_latent)
+check("① 不再报「无法确定季号」", "无法确定季号" not in latent_rep.to_text())
+check("① 剧集 id 也来自目录名（tmdb:21712）",
+      latent_rep.provider is not None and latent_rep.calls >= 1, str(latent_rep.calls))
+
+print()
+print("=" * 70)
 print("fanart.tv：光盘图 / 横幅图 / 透明艺术图 / 横版缩略图")
 print("=" * 70)
 _orig_urlopen = module.urllib.request.urlopen
