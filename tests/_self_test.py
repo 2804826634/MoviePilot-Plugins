@@ -299,6 +299,33 @@ check("不加 # 后缀时两种类型都处理（回归）", "扫描 NFO 6 个" 
 
 print()
 print("=" * 70)
+print("第 13 轮：并发处理（--concurrency）结果必须与顺序执行完全一致")
+print("=" * 70)
+reset_fixture()
+seq_out = run("--mode", "report")
+reset_fixture()
+par_out = run("--mode", "report", "--concurrency", "4")
+
+
+def _summary(text):
+    return next((line for line in text.splitlines() if line.startswith("扫描 NFO")), "")
+
+
+def _details(text):
+    return sorted(line for line in text.splitlines() if line.startswith("["))
+
+
+seq_sum, par_sum = _summary(seq_out), _summary(par_out)
+check("并发 4 与顺序执行的统计完全一致（没有丢计数）", seq_sum == par_sum,
+      f"\n    顺序: {seq_sum}\n    并发: {par_sum}")
+check("两者的变更明细条数与内容一致（没有串行化错误）",
+      _details(seq_out) == _details(par_out),
+      f"顺序 {len(_details(seq_out))} 条 / 并发 {len(_details(par_out))} 条")
+check("日志里明确写出了并发数", "并发 4" in par_out)
+check("顺序执行时不打印并发字样", "并发" not in seq_out)
+
+print()
+print("=" * 70)
 reset_fixture()   # 复原样例库：保证可重复运行，并清掉 .nfo-backup 残留
 failed = [r for r in results if not r[1]]
 print(f"共 {len(results)} 项断言，通过 {len(results) - len(failed)}，失败 {len(failed)}")

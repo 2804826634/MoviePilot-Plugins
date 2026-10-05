@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.5.0-blue)
+![version](https://img.shields.io/badge/version-1.6.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -137,6 +137,33 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 
 ---
 
+## 性能与速度
+
+### 时间花在哪里
+
+| 阶段 | 是否走网络 | 说明 |
+| --- | --- | --- |
+| 扫描 NFO、读写文件 | 本地 | 很快，不是瓶颈 |
+| 比对字段、算图片指纹（sha256） | 本地 | 也很快（单张图才几百 KB） |
+| **TMDB / fanart.tv 查询** | 网络 | 每个条目 2～4 次请求，受限速控制 |
+| **图片下载** | 网络 | 首轮、或改了画质档之后最耗时的一项 |
+
+### 怎么加快
+
+1. **调大「并发数」**（默认 `4`，可到 `8`）：同时处理多个 NFO，把上面两项网络等待重叠起来。
+   对本地磁盘与 CPU 压力很小，所以开着基本只有好处。
+2. **首次运行先用「只补缺失」**（`image_mode = missing`）：只补空缺的图，先不下载已有图去比对，
+   首轮能省掉全部下载流量。
+3. **分批跑**：把「媒体库目录」先填成一个子目录，跑顺了再全量。
+4. **稳态几乎不花时间**：图片靠指纹清单（`image_manifest.json`）判定，内容没变就**零下载**；
+   真正每次都要联网的只有元数据查询。
+
+> **并发下的限速**：单线程时 TMDB 最快 4 请求/秒；并发时按并发数等比放宽，
+> 但有 **12 请求/秒的硬上限**（仍远低于 TMDB 的限制），避免把接口打到限流。
+> 限速器是**全局**的 —— 不会因为开多线程就把请求速率翻倍。
+
+---
+
 ## 三层保护
 
 1. **NFO 内锁定** —— 遵循 Kodi 语义，遇到 `<lockdata>true</lockdata>` 或 `<lockedfields>` 时跳过对应字段与图片（可用 `respect_lock` 关闭）。
@@ -205,7 +232,8 @@ docker restart moviepilot-v2
 | `onlyonce` | 关 | 保存配置后立即运行一次 |
 | `notify` | 开 | 完成后发送通知 |
 | `mode` | `sync` | 处理模式，见上表 |
-| `cron` | `0 3 * * *` | 执行周期（5 位 cron） |
+| `cron` | **空** | 执行周期。**留空 = 每周日凌晨 3 点跑一次**；想更频繁再自己填 5 位 cron |
+| `concurrency` | `4` | 并发数（1 = 顺序执行）。详见下面「性能与速度」 |
 | `dry_run` | 关 | 演练模式，不写盘 |
 | `respect_lock` | 开 | 尊重 NFO 内 `lockdata` / `lockedfields`（NFO 字段与图片都受它保护） |
 | `backup` | 开 | 写入前备份 NFO 与图片到 `.nfo-backup/` |
@@ -336,8 +364,8 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 无需联网、无需 TMDB Key，纯标准库：
 
 ```bash
-python tests/_self_test.py          # 引擎行为 57 项断言（含图片补齐/别名/指纹幂等/#类型限定）
-python tests/_self_test_plugin.py   # 插件面 136 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart）
+python tests/_self_test.py          # 引擎行为 61 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性）
+python tests/_self_test_plugin.py   # 插件面 145 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
