@@ -19,12 +19,12 @@ MoviePilot 通过环境变量 `PLUGIN_MARKET`（逗号分隔的 `owner/repo` 列
 services:
   moviepilot:
     environment:
-      - PLUGIN_MARKET=jxxghp/MoviePilot-Plugins,peter_chen/MoviePilot-Plugins
+      - PLUGIN_MARKET=jxxghp/MoviePilot-Plugins,peter_chen/moviepilot-nfo-gapfill
 ```
 
 - **追加**而不是覆盖，官方市场依然可用。
-- 也可以在 UI 里：`设定 → 插件 → 插件市场 → 自定义仓库` 直接填 `peter_chen/MoviePilot-Plugins`。
-- MP 会请求 `https://raw.githubusercontent.com/peter_chen/MoviePilot-Plugins/main/package.v2.json`。
+- 也可以在 UI 里：`设定 → 插件 → 插件市场 → 自定义仓库` 直接填 `peter_chen/moviepilot-nfo-gapfill`。
+- MP 会请求 `https://raw.githubusercontent.com/peter_chen/moviepilot-nfo-gapfill/main/package.v2.json`。
   如果容器访问 GitHub 困难，配置 `PROXY_HOST` 或将 `GITHUB_TOKEN` 填上（提高 API 限额）。
 - 拉取成功后，市场里搜索「NFO」即可看到本插件，点击安装。
 
@@ -35,7 +35,7 @@ services:
 ## 三、方式 B：本地插件仓库
 
 ```bash
-git clone https://github.com/peter_chen/MoviePilot-Plugins.git /path/to/mp_plugins
+git clone https://github.com/peter_chen/moviepilot-nfo-gapfill.git /path/to/mp_plugins
 ```
 
 ```yaml

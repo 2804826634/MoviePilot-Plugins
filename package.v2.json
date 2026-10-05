@@ -4,7 +4,7 @@
     "description": "比对本地 NFO 与在线元数据：缺失补齐、不一致替换、一致跳过；支持字段保护与 NFO 锁定。",
     "labels": "工具",
     "version": "1.0.0",
-    "icon": "https://raw.githubusercontent.com/peter_chen/MoviePilot-Plugins/main/icons/nfogapfill.png",
+    "icon": "https://raw.githubusercontent.com/peter_chen/moviepilot-nfo-gapfill/main/icons/nfogapfill.png",
     "author": "peter_chen",
     "level": 1,
     "v3": false,
