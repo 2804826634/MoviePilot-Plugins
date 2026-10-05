@@ -519,6 +519,91 @@ check("清理脏值只认「对象字面量」，正常片名不受影响",
 
 print()
 print("=" * 70)
+print("回归：以前会漏掉脏值清理的四条路径（用户反馈「升级了也没修好」）")
+print("=" * 70)
+empty_cache = DATA_PATH / "empty_cache.json"
+empty_cache.write_text("{}", encoding="utf-8")
+DIRTY = CLEAN3 + f"  <studio>{JUNK_A}</studio>\n"
+
+
+def run_case(body, mode="sync", cache=None, protect=(), tag="x"):
+    studio_nfo.write_text(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<movie>\n'
+        '  <title>某片</title>\n  <year>2023</year>\n  <tmdbid>997</tmdbid>\n'
+        + body + "</movie>\n", encoding="utf-8")
+    report = module.Engine(
+        module.EngineConfig(roots=[studio_root], mode=mode, protect_fields=set(protect),
+                            manifest_path=DATA_PATH / f"case_{tag}.json"),
+        module.FileProvider(str(cache or strip_cache))).run()
+    return studio_nfo.read_text(encoding="utf-8"), report
+
+
+# ① 拿不到在线数据：以前直接 return，脏值永远留着
+after_u, rep_u = run_case(DIRTY, cache=empty_cache, tag="unresolved")
+check("① 拿不到在线数据时也会清掉脏 studio（正常值保留）",
+      after_u.count("<studio>") == 3 and "{'id'" not in after_u
+      and "CoMix Wave Films" in after_u, after_u)
+check("① 清理数量计入报告（详情页能看到）", rep_u.scrubbed >= 1, str(rep_u.scrubbed))
+
+# ② 只补缺失模式：以前被判为 REPLACE 而整条跳过
+after_g, _ = run_case(DIRTY, mode="gapfill", tag="gapfill")
+check("②「只补缺失」模式不再挡住脏值清理",
+      after_g.count("<studio>") == 3 and "{'id'" not in after_g, after_g)
+
+# ③ 保护字段：以前也会挡住
+after_p, _ = run_case(DIRTY, protect=("studio",), tag="protect")
+check("③「保护字段」不再挡住脏值清理",
+      after_p.count("<studio>") == 3 and "{'id'" not in after_p, after_p)
+
+# ④ lockdata 锁定：脏值是本插件旧版写坏的，锁不该保护自己的 bug 产物
+after_l, _ = run_case("  <lockdata>true</lockdata>\n" + DIRTY, tag="locked")
+check("④ 被 lockdata 锁定的条目也会清掉脏值（原文件已备份）",
+      after_l.count("<studio>") == 3 and "{'id'" not in after_l, after_l)
+
+# ⑤ 只报告模式：按设计一个字节都不写
+after_r, _ = run_case(DIRTY, mode="report", tag="report")
+check("⑤「只报告」模式不写盘（脏值留给下次 sync 清）",
+      "{'id'" in after_r and after_r.count("<studio>") == 4, after_r)
+
+print()
+print("=" * 70)
+print("回归：单集 NFO 里的 tmdbid 是「单集 id」，不能当剧集 id 用")
+print("=" * 70)
+check("目录名工具：{tmdbid=xxx} / 标题年份 都能解析",
+      module.tmdb_id_from_dir("藏海传 (2025) {tmdbid=252640}") == "252640"
+      and module.title_year_from_dir("藏海传 (2025) {tmdbid=252640}")[0].startswith("藏海传")
+      and module.title_year_from_dir("藏海传 (2025) {tmdbid=252640}")[1] == "2025"
+      and module.tmdb_id_from_dir("怪奇物语 (2016)") is None)
+
+# ① 有 tvshow.nfo：即使单集 NFO 写了自己的 tmdbid，也要用剧集 id
+ep_nfo_path = FIX / "电视剧" / "怪奇物语 (2016)" / "Season 01" / "怪奇物语 - S01E01.nfo"
+ep_loaded = module.load_nfo(ep_nfo_path)
+ET.SubElement(ep_loaded.root, "tmdbid").text = "5301287"      # 单集自己的 id
+ep_engine = module.Engine(module.EngineConfig(roots=[FIX]),
+                          module.FileProvider(str(DATA_PATH / "empty_cache.json")))
+ep_id, ep_src = ep_engine.resolve_tmdb_id(ep_loaded)
+check("① 单集 NFO 里的 tmdbid 不会被当作剧集 id（取 tvshow.nfo 的）",
+      ep_id == "66732", f"得到 {ep_id}（{ep_src}）")
+
+# ② 没有 tvshow.nfo：退到剧集目录名里的 {tmdbid=xxx}（用户库的真实目录结构）
+user_show = DATA_PATH / "dirid" / "国产剧" / "藏海传 (2025) {tmdbid=252640}" / "Season 01"
+user_show.mkdir(parents=True, exist_ok=True)
+user_ep = user_show / "藏海传 S01E07 2160p.WEB-DL.H265.DTS 5.1-CHDWEB.nfo"
+user_ep.write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<episodedetails>\n'
+    '  <title>第 7 集</title>\n  <season>1</season>\n  <episode>7</episode>\n'
+    '  <tmdbid>5301287</tmdbid>\n</episodedetails>\n', encoding="utf-8")
+user_loaded = module.load_nfo(user_ep)
+user_engine = module.Engine(module.EngineConfig(roots=[DATA_PATH]),
+                            module.FileProvider(str(DATA_PATH / "empty_cache.json")))
+user_id, user_src = user_engine.resolve_tmdb_id(user_loaded)
+check("② 没有 tvshow.nfo 时用剧集目录名里的 tmdbid（复现用户那两条日志）",
+      user_id == "252640", f"得到 {user_id}（{user_src}）")
+check("② 全程不会退回到单集自己的 id", user_id != "5301287")
+check("② 来源标注可读", "目录名" in user_src, user_src)
+
+print()
+print("=" * 70)
 print("fanart.tv：光盘图 / 横幅图 / 透明艺术图 / 横版缩略图")
 print("=" * 70)
 _orig_urlopen = module.urllib.request.urlopen
