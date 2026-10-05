@@ -106,8 +106,10 @@ def reset_fixture():
     shutil.rmtree(FIX / ".nfo-backup", ignore_errors=True)
 
 
-def run(*extra):
-    cmd = [PY, str(TOOL), "--root", str(FIX), "--source", "file", "--cache", str(CACHE), *extra]
+def run(*extra, root=None):
+    """root 可覆盖默认媒体库根目录，用于测试「#类型」后缀这类场景。"""
+    cmd = [PY, str(TOOL), "--root", str(root if root is not None else FIX),
+           "--source", "file", "--cache", str(CACHE), *extra]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         print(proc.stdout)
@@ -272,6 +274,28 @@ reset_fixture()
 out = run("--mode", "sync", "--fix", "--image-mode", "off")
 check("关闭图片时不写图片", not POSTER.exists() and not BACKDROP.exists())
 check("关闭图片时报告里没有图片统计", "检查图片" not in out)
+
+print()
+print("=" * 70)
+print("第 12 轮：媒体库目录的「#类型」限定（只识别电影 / 只识别电视剧）")
+print("=" * 70)
+reset_fixture()
+# 样例库共 6 个 NFO：电影 3 个、剧集相关 3 个（tvshow + season + 单集）
+out = run("--mode", "report", root=f"{FIX}#电视剧")
+check("限定 #电视剧：跳过 3 个电影 NFO", "按目录的「#类型」限定跳过 3 个 NFO" in out)
+check("限定 #电视剧：只扫描剧集相关的 3 个 NFO", "扫描 NFO 3 个" in out)
+
+out = run("--mode", "report", root=f"{FIX}#电影")
+check("限定 #电影：跳过 3 个剧集 NFO", "按目录的「#类型」限定跳过 3 个 NFO" in out)
+check("限定 #电影：只扫描 3 个电影 NFO", "扫描 NFO 3 个" in out)
+
+out = run("--mode", "report", root=f"{FIX}/电影#电影")
+check("限定子目录 /电影#电影 时也只处理电影", "扫描 NFO 3 个" in out
+      and "按目录的「#类型」限定跳过" not in out)
+
+out = run("--mode", "report", root=str(FIX))
+check("不加 # 后缀时两种类型都处理（回归）", "扫描 NFO 6 个" in out
+      and "按目录的「#类型」限定跳过" not in out)
 
 print()
 print("=" * 70)

@@ -89,6 +89,16 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
 
     详情页展示的是「本次修改了哪些文件」表格（含演练/只报告模式下的待改动清单）；
     完整文本报告（含每一条跳过的原因）写在插件数据目录的 last_report.txt。
+
+────────────────────────────────────────────────────────────────────────
+六、媒体库目录可限定类型（每行一个目录，行尾加 #类型）
+    /media/link/电影#电影      → 该目录只处理电影
+    /media/link/剧集#电视剧    → 该目录只处理剧集（含季、单集）
+    /media/link/纪录片         → 不加后缀则两种类型都处理
+    后缀别名：movie / movies / 影片、tv / tvshow / series / 剧集。
+    写法与官方「媒体库刮削」的 scraper_paths 一致，老配置可直接搬。
+    路径本身含 # 时不受影响（认不出的后缀会当路径的一部分保留）。
+    被跳过的数量会在报告的「按目录的『#类型』限定跳过 N 个 NFO」里体现。
 """
 
 from __future__ import annotations
@@ -160,7 +170,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
@@ -205,6 +215,66 @@ def mp_setting(name: str, default: Any = None) -> Any:
     if isinstance(value, str) and not value.strip():
         return default
     return value
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 媒体库目录的「#类型」后缀
+#   /media/link/电影#电影    → 这个目录只处理电影
+#   /media/link/剧集#电视剧  → 这个目录只处理剧集（含季、单集）
+#   不加后缀                 → 两种类型都处理
+# 与官方「媒体库刮削」的 scraper_paths 写法保持一致，方便老用户迁移配置。
+# ══════════════════════════════════════════════════════════════════════
+TYPE_TAGS: Dict[str, str] = {
+    "电影": "movie", "影片": "movie", "movie": "movie", "movies": "movie",
+    "电视剧": "tv", "剧集": "tv", "电视": "tv", "tv": "tv",
+    "tvshow": "tv", "series": "tv", "show": "tv",
+}
+TYPE_TAG_CN = {"movie": "电影", "tv": "电视剧"}
+
+
+def normalize_type_tag(tag: str) -> Optional[str]:
+    """把 `#电影` / `#电视剧` / `#movie` / `#tv` 这类后缀归一成 movie / tv。"""
+    key = norm_text(tag).casefold().replace(" ", "")
+    return TYPE_TAGS.get(key)
+
+
+def parse_root_specs(specs: List[str], resolve: bool = False) -> Tuple[List[Path], Dict[str, str]]:
+    """解析「路径[#类型]」形式的媒体库目录，返回 (目录列表, {目录: 强制类型})。
+
+    识别不出类型时（例如路径里本来就带 #），`#...` 会当成路径的一部分保留，
+    不会把用户真实的目录名吃掉。
+    """
+    roots: List[Path] = []
+    types: Dict[str, str] = {}
+    for spec in specs:
+        text = str(spec or "").strip()
+        if not text:
+            continue
+        forced: Optional[str] = None
+        if "#" in text:
+            head, _, tail = text.rpartition("#")
+            tag = normalize_type_tag(tail)
+            if tag and head.strip():
+                forced, text = tag, head.strip()
+        path = Path(text)
+        if resolve:
+            path = path.expanduser().resolve()
+        roots.append(path)
+        if forced:
+            types[str(path)] = forced
+    return roots, types
+
+
+def type_allowed(forced: Optional[str], media_type: str) -> bool:
+    """目录被限定为单一类型时，判断某个 NFO 是否该被处理。
+
+    限电影 → 只收 movie；限电视剧 → 收 tvshow / season / episodedetails。
+    """
+    if forced == "movie":
+        return media_type == "movie"
+    if forced == "tv":
+        return media_type in ("tvshow", "season", "episodedetails")
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1071,6 +1141,7 @@ class FileProvider:
 class EngineConfig:
     roots: List[Path]
     exclude_paths: List[str] = field(default_factory=list)
+    root_types: Dict[str, str] = field(default_factory=dict)   # {目录路径: movie|tv} 限定该目录的类型
     mode: str = "sync"                     # report | gapfill | sync | force
     protect_fields: set = field(default_factory=set)
     only_fields: set = field(default_factory=set)
@@ -1106,6 +1177,7 @@ class Report:
     untouched: int = 0            # 无任何差异
     changed_files: int = 0        # 实际写入了几个文件
     skipped_locked: int = 0
+    skipped_type: int = 0         # 所在目录被 #类型 限定时跳过的条数
     unresolved: int = 0           # 拿不到在线数据
     failed: int = 0
     counts: Dict[str, int] = field(default_factory=dict)    # 差异判定统计
@@ -1129,6 +1201,8 @@ class Report:
             f"扫描 NFO {self.scanned} 个｜无差异 {self.untouched}｜已写入文件 {self.changed_files}"
             f"｜受锁保护 {self.skipped_locked}｜取不到在线数据 {self.unresolved}｜失败 {self.failed}",
         ]
+        if self.skipped_type:
+            lines.append(f"按目录的「#类型」限定跳过 {self.skipped_type} 个 NFO（类型不符）")
         if self.counts:
             lines.append("差异判定：" + "｜".join(f"{k} {v}" for k, v in self.counts.items()))
         if self.applied:
@@ -1332,6 +1406,19 @@ class Engine:
                     f"写入 {self.report.images_written}")
         return self.report
 
+    def forced_type(self, root: Path) -> Optional[str]:
+        """该目录是否被 #电影 / #电视剧 限定了类型；没限定返回 None。"""
+        if not self.cfg.root_types:
+            return None
+        key = str(root)
+        if key in self.cfg.root_types:
+            return self.cfg.root_types[key]
+        normalized = key.replace("\\", "/").casefold()      # 容错大小写与斜杠方向
+        for candidate, forced in self.cfg.root_types.items():
+            if candidate.replace("\\", "/").casefold() == normalized:
+                return forced
+        return None
+
     def process(self, path: Path, root_dir: Path) -> None:
         nfo = load_nfo(path)
         if not nfo:
@@ -1341,6 +1428,15 @@ class Engine:
             rel = str(path.relative_to(root_dir))
         except ValueError:
             pass
+
+        # 目录被 #电影 / #电视剧 限定时，类型不符的 NFO 直接跳过
+        forced = self.forced_type(root_dir)
+        if not type_allowed(forced, nfo.media_type):
+            self.report.skipped_type += 1
+            logger.debug(f"{rel}：所在目录被限定为「{TYPE_TAG_CN.get(forced or '', forced)}」，"
+                         f"与 NFO 类型 {nfo.media_type} 不符，跳过")
+            return
+
         self.report.scanned += 1
 
         managed = MANAGED_FIELDS.get(nfo.media_type, [])
@@ -1601,9 +1697,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._cast_limit = str(config.get("cast_limit") or "20")
             self._notify = bool(config.get("notify", True))
             self._image_mode = config.get("image_mode") or IMG_SYNC
-            # 图片类型用复选框组存成列表；老配置里是逗号字符串，None 表示还没配过
-            kinds = config.get("image_kinds")
-            self._image_kinds = list(IMAGE_KINDS) if kinds is None else kinds
+            # 图片类型是多选下拉，存成列表；键不存在说明是老配置，按默认全选
+            if "image_kinds" in config:
+                self._image_kinds = config.get("image_kinds")
+            else:
+                self._image_kinds = list(IMAGE_KINDS)
             self._image_quality = config.get("image_quality") or "standard"
 
         self.stop_service()
@@ -1720,18 +1818,18 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                                {"component": "VCheckbox", "props": {
-                                    "model": "image_kinds", "value": "poster", "label": "海报"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                                {"component": "VCheckbox", "props": {
-                                    "model": "image_kinds", "value": "backdrop", "label": "背景图"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                                {"component": "VCheckbox", "props": {
-                                    "model": "image_kinds", "value": "logo", "label": "徽标"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                                {"component": "VCheckbox", "props": {
-                                    "model": "image_kinds", "value": "thumb", "label": "剧集缩略图"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "image_kinds",
+                                    "label": "处理的图片类型（可多选）",
+                                    "multiple": True,
+                                    "chips": True,
+                                    "items": [
+                                        {"title": "海报（poster.jpg）", "value": "poster"},
+                                        {"title": "背景图（backdrop.jpg + fanart.jpg）", "value": "backdrop"},
+                                        {"title": "徽标（logo.png）", "value": "logo"},
+                                        {"title": "剧集缩略图（与视频同名的 .jpg）", "value": "thumb"},
+                                    ]}}]},
                         ],
                     },
                     {
@@ -1739,12 +1837,10 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "上面四项就是要处理的图片类型，全部不勾选等同于关闭图片处理。"
-                                         "勾选后落盘的文件名（与 Kodi / Jellyfin 约定一致）："
-                                         "海报 → poster.jpg；背景图 → backdrop.jpg 并额外写一份 fanart.jpg；"
-                                         "徽标 → logo.png；剧集缩略图 → 与该集视频同名的 .jpg。"
-                                         "季海报会跟随「海报」一起处理，写在季目录 poster.jpg 并同步一份到剧集根目录 "
-                                         "seasonNN-poster.jpg。"
+                                 "text": "上面这项决定要处理哪些图片：全部不选就是「不处理任何图片」，"
+                                         "等同于把图片处理关掉（不会偷偷回退成全部）。"
+                                         "「季海报」跟随「海报」一起处理：写在季目录 poster.jpg，"
+                                         "并同步一份到剧集根目录 seasonNN-poster.jpg。"
                                          "图片沿用与 NFO 相同的「一致才跳过」逻辑：先比对本地图与在线图，"
                                          "一致不动、不一致才替换 —— 官方「媒体库刮削」只判断文件在不在，"
                                          "所以低清图、错图永远不会被换掉。首次运行需要下载比对以建立指纹，"
@@ -1756,8 +1852,25 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VTextarea", "props": {
-                                    "model": "paths", "label": "媒体库目录", "rows": 4,
-                                    "placeholder": "每行一个目录，例如 /media/link/电影\n/media/link/电视剧"}}]},
+                                    "model": "paths",
+                                    "label": "媒体库目录（每行一个；行尾可加 #电影 / #电视剧 限定类型）",
+                                    "rows": 5,
+                                    "placeholder": "/media/link/电影#电影\n"
+                                                   "/media/link/电视剧#电视剧\n"
+                                                   "/media/link/其它    （不加 # 则电影和电视剧都处理）"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "「媒体库目录」的行尾可以加 #电影 或 #电视剧 来限定这个目录只处理对应类型，"
+                                         "例如 /media/link/电影#电影 就只会处理电影，"
+                                         "该目录下即使有剧集 NFO 也会被跳过（写入 #电视剧 同理，"
+                                         "会处理剧集及其季、单集）。不加后缀则该目录下两种类型都处理。"
+                                         "别名也认：movie / movies / 影片、tv / tvshow / series / 剧集。"
+                                         "跳过数量会在运行报告的「按目录的『#类型』限定跳过」里体现。"}]},
                         ],
                     },
                     {
@@ -1840,10 +1953,24 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "component": "VRow",
                         "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
+                                {"component": "VSelect", "props": {
                                     "model": "cert_country",
                                     "label": "分级地区码（决定 mpaa 取哪个地区的分级）",
-                                    "placeholder": "US / GB / JP / DE …（两位 ISO 国家码）"}}]},
+                                    "items": [
+                                        {"title": "美国 — PG-13 / R（默认）", "value": "US"},
+                                        {"title": "中国大陆 — 无官方分级，通常取不到值", "value": "CN"},
+                                        {"title": "中国香港 — IIA / IIB / III", "value": "HK"},
+                                        {"title": "中国台湾 — 普遍级 / 保护级 / 辅15", "value": "TW"},
+                                        {"title": "日本 — G / PG12 / R15+", "value": "JP"},
+                                        {"title": "韩国 — ALL / 12 / 15 / 19", "value": "KR"},
+                                        {"title": "英国 — 12 / 15 / 18", "value": "GB"},
+                                        {"title": "德国 — FSK 12 / FSK 16", "value": "DE"},
+                                        {"title": "法国 — Tous publics / -12 / -16", "value": "FR"},
+                                        {"title": "意大利 — T / VM14 / VM18", "value": "IT"},
+                                        {"title": "西班牙 — APTA / 12 / 16 / 18", "value": "ES"},
+                                        {"title": "澳大利亚 — PG / M / MA15+", "value": "AU"},
+                                        {"title": "加拿大 — PG / 14A / 18A", "value": "CA"},
+                                    ]}}]},
                         ],
                     },
                     {
@@ -1855,7 +1982,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                          "而 TMDB 上同一部片在不同国家的分级并不一样，这个配置就决定取哪一份 —— "
                                          "填 US 得到 PG-13 / R，填 GB 得到 12 / 15 / 18，填 JP 得到 G / PG12 / R15+。"
                                          "注意中国大陆没有官方影视分级体系，填 CN 通常取不到值；"
-                                         "若所选地区恰好缺该片的分级，会自动退回到任意有值的地区，不会留空。"}]},
+                                         "若所选地区恰好缺该片的分级，会自动退回到任意有值的地区，不会留空。"
+                                         "下拉里只列了常用地区；万一需要别的地区，"
+                                         "可以把插件配置里的 cert_country 直接改成对应的两位 ISO 国家码。"}]},
                         ],
                     },
                     {
@@ -2151,34 +2280,41 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     def __image_kinds_set(self) -> set:
         """解析「处理的图片类型」。
 
-        表单里是多选框，存成列表；老配置和 CLI 传的是逗号分隔字符串，两种都要能吃下。
-        两种载体的「空」含义不同，故意区别对待：
+        表单里是多选下拉（存成列表），老配置与 CLI 传的是逗号分隔字符串，两种都要能吃下。
+        「空」的含义按载体区分，但都归结为「用户明确关掉了图片」，绝不偷偷回退成全部：
 
-        - **列表为空** → 用户把四个框全取消了，就是明确表示不处理图片，返回空集合；
-        - **字符串为空** → 没配过，返回全部类型；
-        - **字符串有值但一个都没解析对** → 大概率是手写错字，回退全部，避免静默什么都不做。
+        - 列表为空 / `None`（多选被清空，宿主可能存成 null）→ 空集合
+        - 空字符串 → 空集合
+        - 字符串有值但一个都没解析对 → 大概率是手写错字，回退全部，避免静默什么都不做
         """
         raw = self._image_kinds
+        if raw is None:
+            return set()
         if isinstance(raw, (list, tuple, set)):
             picked = {str(item).strip().casefold() for item in raw if str(item).strip()}
             return picked & set(IMAGE_KINDS)
 
-        text = str(raw or "").strip()
+        text = str(raw).strip()
         if not text:
-            return set(IMAGE_KINDS)
+            return set()
         picked = {item.strip().casefold()
                   for item in re.split(r"[,\s]+", text) if item.strip()}
         return (picked & set(IMAGE_KINDS)) or set(IMAGE_KINDS)
 
     def __run(self) -> None:
         try:
-            roots = [Path(p) for p in self.__split_lines(self._paths)]
+            roots, root_types = parse_root_specs(self.__split_lines(self._paths))
             if not roots:
                 logger.warning("未配置任何媒体库目录，任务结束")
                 return
+            if root_types:
+                logger.info("已限定目录类型：" + "，".join(
+                    f"{item} → {TYPE_TAG_CN.get(forced, forced)}"
+                    for item, forced in root_types.items()))
             cfg = EngineConfig(
                 roots=roots,
                 exclude_paths=self.__split_lines(self._exclude_paths),
+                root_types=root_types,
                 mode=self._mode if self._mode in ("report", "gapfill", "sync", "force") else "sync",
                 protect_fields=self.__split_set(self._protect_fields),
                 only_fields=self.__split_set(self._only_fields),
@@ -2279,7 +2415,8 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                "  正式执行            python NfoGapFill.py --root /media/link --source tmdb --api-key XXX --mode sync --fix\n"
                "  含图片              ... --fix --image-mode sync\n"
                "\n注意：插件里图片处理默认开启（sync），CLI 里默认关闭（off），需显式指定。")
-    parser.add_argument("--root", action="append", required=True, help="媒体库目录，可重复指定")
+    parser.add_argument("--root", action="append", required=True,
+                        help="媒体库目录，可重复指定；行尾可加 #电影 / #电视剧 限定该目录的类型")
     parser.add_argument("--source", choices=["tmdb", "host", "file"], default="tmdb",
                         help="在线数据来源：tmdb 直连 / host 宿主链路 / file 本地 JSON")
     parser.add_argument("--cache", default="", help="--source file 时的 JSON 路径")
@@ -2311,10 +2448,15 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
 
     import os
     args.api_key = args.api_key or os.environ.get("TMDB_API_KEY", "")
-    roots = [Path(p).expanduser().resolve() for p in args.root]
+    roots, root_types = parse_root_specs(args.root, resolve=True)
+    if not roots:
+        raise SystemExit("--root 至少要给一个媒体库目录")
     for root in roots:
         if not root.is_dir():
             raise SystemExit(f"目录不存在：{root}")
+    if root_types:
+        print("目录类型限定：" + "，".join(
+            f"{item} → {TYPE_TAG_CN.get(forced, forced)}" for item, forced in root_types.items()))
     if not args.fix:
         args.mode = "report"
 
@@ -2325,6 +2467,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     cfg = EngineConfig(
         roots=roots,
         exclude_paths=[s.strip() for s in re.split(r"[,\n]+", args.exclude) if s.strip()],
+        root_types=root_types,
         mode=args.mode,
         protect_fields={s.strip().casefold() for s in re.split(r"[,\s]+", args.protect) if s.strip()},
         only_fields={s.strip().casefold() for s in re.split(r"[,\s]+", args.only) if s.strip()},

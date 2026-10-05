@@ -137,16 +137,24 @@ print("本次针对反馈调整的配置项")
 print("=" * 70)
 check("「单轮最多处理文件数」已移除",
       "max_files" not in defaults and "'model': 'max_files'" not in form_json)
-check("图片类型改为复选框组（4 个 VCheckbox 共享 image_kinds）",
-      form_json.count("'component': 'VCheckbox'") == 4
-      and form_json.count("'model': 'image_kinds'") == 4)
-check("图片类型复选框显示中文名",
-      all(f"'label': '{name}'" in form_json
-          for name in ("海报", "背景图", "徽标", "剧集缩略图")))
+check("图片类型改为多选下拉框（multiple + chips），不再用只能单选的复选框",
+      "'model': 'image_kinds'" in form_json
+      and "'multiple': True" in form_json and "'chips': True" in form_json
+      and "'component': 'VCheckbox'" not in form_json)
+check("图片类型选项为中文，并标注落盘文件名",
+      all(f"'title': '{title}'" in form_json for title in
+          ("海报（poster.jpg）", "背景图（backdrop.jpg + fanart.jpg）",
+           "徽标（logo.png）", "剧集缩略图（与视频同名的 .jpg）")))
 check("图片类型默认全选", sorted(defaults["image_kinds"]) == sorted(module.IMAGE_KINDS))
 check("演员写入上限改为下拉选项，且含「全部」",
       "'model': 'cast_limit'" in form_json
       and "'title': '全部（按 TMDB 返回的全写，NFO 会明显变大）', 'value': '0'" in form_json)
+check("分级地区码改为单选下拉，含常用地区",
+      "'model': 'cert_country', 'label': '分级地区码（决定 mpaa 取哪个地区的分级）'" in form_json
+      and all(f"'value': '{code}'" in form_json
+              for code in ("US", "CN", "HK", "TW", "JP", "GB", "DE")))
+check("全表单只有图片类型是多选（分级地区码保持单选）",
+      form_json.count("'multiple': True") == 1)
 check("分级地区码给了完整说明（mpaa 与各地区分级差异）",
       "分级地区码」怎么填" in form_json and "PG-13" in form_json)
 check("字段白名单给了说明，并讲清了与保护字段的区别",
@@ -154,18 +162,44 @@ check("字段白名单给了说明，并讲清了与保护字段的区别",
 check("已写明 TMDB Key / 代理留空会自动沿用 MoviePilot 的配置",
       "自动读取 MoviePilot 里已配置的值" in form_json)
 
-# 图片类型解析：列表（复选框）与字符串（老配置 / CLI）两种载体
+# 图片类型解析：列表（多选下拉）与字符串（老配置 / CLI）两种载体
 def kinds_of(value):
     probe = module.NfoGapFill.__new__(module.NfoGapFill)
     probe._image_kinds = value
     return probe._NfoGapFill__image_kinds_set()
 
-check("复选框列表能正确解析（大小写不敏感）", kinds_of(["poster", "LOGO"]) == {"poster", "logo"})
-check("四个框全不勾 = 不处理任何图片（不会偷偷回退成全部）", kinds_of([]) == set())
+check("多选列表能正确解析（大小写不敏感）", kinds_of(["poster", "LOGO"]) == {"poster", "logo"})
+check("多选被清空（[] / null / 空串）= 不处理任何图片（不会偷偷回退成全部）",
+      kinds_of([]) == set() and kinds_of(None) == set() and kinds_of("") == set())
 check("老配置的逗号字符串仍兼容", kinds_of("poster, backdrop") == {"poster", "backdrop"})
-check("字符串为空 = 没配过，默认全部类型", kinds_of("") == set(module.IMAGE_KINDS))
 check("字符串写错时回退全部（避免手写错字导致静默不干活）",
       kinds_of("posterr") == set(module.IMAGE_KINDS))
+
+# 媒体库目录的 #类型 限定
+roots, types = module.parse_root_specs(["/m/电影#电影", "/m/剧集#电视剧", "/m/其它"])
+# Windows 上 str(Path) 是反斜杠，比较前统一成正斜杠
+by_path = {k.replace("\\", "/"): v for k, v in types.items()}
+check("目录 #电影 后缀被识别并归一为 movie", by_path.get("/m/电影") == "movie")
+check("目录 #电视剧 后缀被识别", by_path.get("/m/剧集") == "tv")
+check("没写后缀的目录不限定类型", "/m/其它" not in by_path)
+check("三种后缀都产出目录，且顺序不变", [str(p).replace("\\", "/") for p in roots]
+      == ["/m/电影", "/m/剧集", "/m/其它"])
+check("别名后缀也认（movie / movies / tvshow / 剧集）",
+      module.normalize_type_tag("movie") == "movie"
+      and module.normalize_type_tag("movies") == "movie"
+      and module.normalize_type_tag("tvshow") == "tv"
+      and module.normalize_type_tag("剧集") == "tv")
+check("认不出的后缀不会把真实路径吃掉",
+      module.parse_root_specs(["/m/a#b/c"])[0][0] == Path("/m/a#b/c")
+      and not module.parse_root_specs(["/m/a#b/c"])[1])
+check("类型限定只放行对应类型（限电影只收 movie，限电视剧收剧集/季/单集）",
+      module.type_allowed("movie", "movie") and not module.type_allowed("movie", "tvshow")
+      and module.type_allowed("tv", "tvshow") and module.type_allowed("tv", "season")
+      and module.type_allowed("tv", "episodedetails")
+      and not module.type_allowed("tv", "movie")
+      and module.type_allowed(None, "movie") and module.type_allowed(None, "tvshow"))
+check("目录键必须与最终 roots 字符串一致（否则限定会失效）",
+      all(k in [str(p) for p in roots] for k in types))
 
 # 演员上限：0 表示不限制
 cast30 = {"cast": [{"name": f"演员{i}", "character": "路人"} for i in range(30)]}

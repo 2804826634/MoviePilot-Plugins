@@ -101,6 +101,8 @@ docker restart moviepilot-v2
 | 市场里看不到插件 | `PLUGIN_MARKET` 没生效（改完要重启容器）；仓库不是 public；容器访问不了 raw.githubusercontent.com，配 `PROXY_HOST` 或 `GITHUB_TOKEN` |
 | 图标是破图 | 属于正常降级，不影响功能；确认 `package.v2.json` 里 `icon` 的 URL 可访问 |
 | 扫描到 0 个 NFO | `paths` 填的是容器内路径（如 `/media/link/电影`），不是宿主机路径；确认该目录在容器里存在 |
+| 某个目录下的 NFO 完全没被处理 | 检查「媒体库目录」是否给该目录加了 `#电影` / `#电视剧`，而它的类型不匹配；报告里的「按目录的『#类型』限定跳过 N 个 NFO」会体现出来。确认后把后缀去掉或改成正确类型即可 |
+| 图片类型下拉框选了却像单选 | 请确认插件已升到 v1.3.0 以上 —— 早期版本用的是复选框，在 MP 里只能单选 |
 | 开了 `notify` 但没收到通知 | 检查 MP 的「通知设置」是否配置了通知渠道 |
 | 报告一直空 | 数据源没拿到数据：`tmdb_api_key` 无效 / 被墙；或 `HostProvider` 在该 MP 版本上字段映射不兼容 → 填 TMDB Key 走直连 |
 | 写入报权限错误 | `PUID/PGID/UMASK` 要对媒体目录有写权限；硬链接做种库尤其注意 |

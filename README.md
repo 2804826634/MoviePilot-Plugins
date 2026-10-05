@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.2.0-blue)
+![version](https://img.shields.io/badge/version-1.3.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -189,17 +189,36 @@ docker restart moviepilot-v2
 | `respect_lock` | 开 | 尊重 NFO 内 `lockdata` / `lockedfields`（NFO 字段与图片都受它保护） |
 | `backup` | 开 | 写入前备份 NFO 与图片到 `.nfo-backup/` |
 | `cast_limit` | `20` | 演员写入上限，可选 `10` / `20` / `30` / `50` / **全部**（`0` = 不限制） |
-| `paths` | 空 | 媒体库目录，每行一个 |
+| `paths` | 空 | 媒体库目录，每行一个；**行尾可加 `#电影` / `#电视剧` 限定该目录的类型**（见下） |
 | `exclude_paths` | 空 | 排除路径片段，命中即跳过 |
 | `protect_fields` | 空 | 保护字段：照常比对，但**只补不换**，永不覆盖已有内容 |
 | `only_fields` | 空 | 字段白名单：**只管列出的字段**，其余完全不参与比对（既不补也不换） |
 | `tmdb_api_key` | 空 | TMDB API Key。**留空 = 自动读取 MoviePilot 里配置的 `TMDB_API_KEY`** |
 | `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`） |
 | `proxy` | 空 | 网络代理。**留空 = 自动读取 MoviePilot 里配置的 `PROXY_HOST`** |
-| `cert_country` | `US` | 分级地区码，决定 NFO 的 `<mpaa>` 取哪个地区的分级（见下） |
+| `cert_country` | `US` | 分级地区码，**单选下拉**：决定 NFO 的 `<mpaa>` 取哪个地区的分级（见下） |
 | `image_mode` | `sync` | 图片处理：`sync` / `missing` / `off`，见上节 |
-| `image_kinds` | 四种全选 | 处理的图片类型，**复选框**：海报 / 背景图 / 徽标 / 剧集缩略图（全不勾 = 不处理图片） |
+| `image_kinds` | 四种全选 | 处理的图片类型，**多选下拉**：海报 / 背景图 / 徽标 / 剧集缩略图（全不选 = 不处理图片） |
 | `image_quality` | `standard` | 画质档：`standard`（海报 w780 / 背景图 w1280 / 徽标 w500）或 `original`（最清晰、体积大） |
+
+### 让某个目录「只认电影」或「只认电视剧」
+
+在「媒体库目录」的行尾加 `#电影` 或 `#电视剧` 即可：
+
+```
+/media/link/电影#电影
+/media/link/电视剧#电视剧
+/media/link/纪录片          ← 不加 # 则两种类型都处理
+```
+
+加了后缀的目录只会处理对应类型的 NFO，**该目录下类型不符的 NFO 会被跳过**并单独计数
+（报告里的「按目录的『#类型』限定跳过 N 个 NFO」）。别名也认：
+`movie` / `movies` / `影片`、`tv` / `tvshow` / `series` / `剧集`。
+
+写法和官方「媒体库刮削」的 `scraper_paths` 一致，老配置可以直接搬过来。
+路径本身含有 `#` 时不受影响 —— 认不出的后缀会当作路径的一部分保留。
+
+CLI 同样支持：`--root "/media/link/电影#电影"`。
 
 ### 两个容易混的字段配置
 
@@ -219,6 +238,8 @@ docker restart moviepilot-v2
 - **季 season**：`title` `plot` `premiered` `season`
 
 ### 分级地区码（`cert_country`）到底管什么
+
+配置页里它是**单选下拉框，只能选一个地区**（列了 13 个常用地区）。
 
 NFO 里的 `<mpaa>` 标签存的其实是**影视分级**（`PG-13`、`R` 这类），而 TMDB 上同一部片在不同国家分级并不一样，
 这个配置就决定取哪一份：
@@ -283,8 +304,8 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 无需联网、无需 TMDB Key，纯标准库：
 
 ```bash
-python tests/_self_test.py          # 引擎行为 51 项断言（含图片补齐/别名/指纹幂等/替换/备份）
-python tests/_self_test_plugin.py   # 插件面 77 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹单元测试）
+python tests/_self_test.py          # 引擎行为 57 项断言（含图片补齐/别名/指纹幂等/#类型限定）
+python tests/_self_test_plugin.py   # 插件面 86 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型单元测试）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
