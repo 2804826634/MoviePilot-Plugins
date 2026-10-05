@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.3.0-blue)
+![version](https://img.shields.io/badge/version-1.4.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -73,15 +73,25 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 
 ## 图片补全
 
-覆盖类型与落盘位置遵循 **MP / Kodi / Jellyfin 三者共同认可**的约定（对照 MP `app/chain/media.py` 的 `IMAGE_ALIASES` 与季目录命名规则实现）：
+### 支持的全部类型（就这 4 类 + 季海报）
 
-| 类型 | 落盘文件 | 说明 |
-| --- | --- | --- |
-| 海报 `poster` | `poster.jpg` | 电影、剧集目录 |
-| 背景图 `backdrop` | `backdrop.jpg` + `fanart.jpg` | 同时写别名，Kodi / Emby 认 `fanart` |
-| 徽标 `logo` | `logo.png` | 透明底 logo |
-| 季海报 `poster` | `<季目录>/poster.jpg` + `<剧集根目录>/seasonNN-poster.jpg` | 两种命名都写，兼容各端 |
-| 剧集缩略图 `thumb` | `<视频文件名>.jpg` | 与 MP 的写法一致，放在视频同级目录 |
+落盘命名遵循 **MP / Kodi / Jellyfin 三者共同认可**的约定（对照 MP `app/chain/media.py` 的 `IMAGE_ALIASES` 与季目录命名规则实现）：
+
+| 配置里的选项 | 落盘文件 | 适用 | 数据来源 |
+| --- | --- | --- | --- |
+| 海报（poster） | `poster.jpg` | 电影、剧集目录 | TMDB `posters` |
+| 背景图（backdrop） | `backdrop.jpg` **+** `fanart.jpg` | 电影、剧集目录 | TMDB `backdrops` |
+| 徽标（logo） | `logo.png` | 电影、剧集目录 | TMDB `logos` |
+| 剧集缩略图（thumb） | `<视频文件名>.jpg` | 单集（需该集有 NFO） | TMDB `stills` |
+| 季海报 | `<季目录>/poster.jpg` **+** `<剧集根目录>/seasonNN-poster.jpg` | 季 | TMDB `posters`（**跟随「海报」一起处理，不单独成项**） |
+
+### 不支持的类型（以及为什么）
+
+`banner`、`clearart`、`discart`、`landscape`、`characterart` 这类画集 **TMDB 并不提供**——
+它只有 海报 / 背景图 / 徽标 / 剧照 四种素材，上面那几类只有 **fanart.tv** 才有，需要另外申请该站 API Key。
+
+所以本插件的定位是：**把你库里已有这几类补全并纠错**，不是「全画集刮削」。
+需要完整画集的话，可以再叠加一个 fanart.tv 类工具，两者不冲突。
 
 三种图片处理档位（`image_mode`）：
 
@@ -192,14 +202,16 @@ docker restart moviepilot-v2
 | `paths` | 空 | 媒体库目录，每行一个；**行尾可加 `#电影` / `#电视剧` 限定该目录的类型**（见下） |
 | `exclude_paths` | 空 | 排除路径片段，命中即跳过 |
 | `protect_fields` | 空 | 保护字段：照常比对，但**只补不换**，永不覆盖已有内容 |
-| `only_fields` | 空 | 字段白名单：**只管列出的字段**，其余完全不参与比对（既不补也不换） |
 | `tmdb_api_key` | 空 | TMDB API Key。**留空 = 自动读取 MoviePilot 里配置的 `TMDB_API_KEY`** |
 | `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`） |
-| `proxy` | 空 | 网络代理。**留空 = 自动读取 MoviePilot 里配置的 `PROXY_HOST`** |
 | `cert_country` | `US` | 分级地区码，**单选下拉**：决定 NFO 的 `<mpaa>` 取哪个地区的分级（见下） |
 | `image_mode` | `sync` | 图片处理：`sync` / `missing` / `off`，见上节 |
 | `image_kinds` | 四种全选 | 处理的图片类型，**多选下拉**：海报 / 背景图 / 徽标 / 剧集缩略图（全不选 = 不处理图片） |
 | `image_quality` | `standard` | 画质档：`standard`（海报 w780 / 背景图 w1280 / 徽标 w500）或 `original`（最清晰、体积大） |
+
+> 🔧 **升级自 v1.2.0 的会自动修好一个历史脏值**：那一版用复选框渲染图片类型，而宿主当时把它当单值处理，
+> 于是配置里存成了 `true` / `false`，界面上会冒出一个写着 `false` 的怪 chip。
+> v1.4.0 起会在插件加载时把这类历史值收敛成合法列表并回写配置（`true` → 全选，`false` → 全不选）。
 
 ### 让某个目录「只认电影」或「只认电视剧」
 
@@ -220,15 +232,13 @@ docker restart moviepilot-v2
 
 CLI 同样支持：`--root "/media/link/电影#电影"`。
 
-### 两个容易混的字段配置
+### 保护字段（`protect_fields`）
 
-| | 参与比对 | 缺失时补 | 已有内容是否会被覆盖 |
-| --- | --- | --- | --- |
-| **字段白名单** `only_fields` | 仅列出的字段 | ✅ | 列出的字段会 |
-| **保护字段** `protect_fields` | ✅ | ✅ | ❌ 永不覆盖 |
+**照常参与比对、缺失也会补，但永远不会覆盖你已有的内容。** 想保住手工润色的简介、
+自己写的一句话宣传语，就把对应字段填进来（逗号分隔）。
 
-两者可以叠加使用，例如：`only_fields = plot,rating` 把维护范围缩到两项，
-再 `protect_fields = plot` 表示简介只补不换。
+> ℹ️ v1.2.0 曾有一个「字段白名单」用来收窄处理范围，按用户反馈已在 v1.4.0 移除。
+> 该能力仍保留在引擎与 CLI 的 `--only` 参数里。
 
 字段名用 NFO 的标签名（小写、逗号分隔）。可用的字段：
 
@@ -305,7 +315,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 57 项断言（含图片补齐/别名/指纹幂等/#类型限定）
-python tests/_self_test_plugin.py   # 插件面 86 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型单元测试）
+python tests/_self_test_plugin.py   # 插件面 94 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
@@ -353,7 +363,9 @@ moviepilot-nfo-gapfill/
 
 - **不提供 banner / clearart / discart / landscape**：这些画集 TMDB 没有，只有 fanart.tv 提供，需要额外申请其 API Key，不在本插件范围内。所以本插件是「补齐 + 纠错」，不是「全画集刮削」，可以和 fanart.tv 类工具并存。
 - **剧集缩略图要求该集存在 NFO**：本插件以 NFO 为扫描入口，没有 NFO 的集不会被处理（电影/剧集/季同理）。
-- **`HostProvider`（复用 MP 刮削通道、免 API Key）能力有限**：字段映射在不同 MP 版本上未逐一验证，属「尽力而为」；图片只能取到海报与背景图（`MediaInfo.poster_path` / `backdrop_path`），剧集缩略图 / 季海报 / 徽标需要填写 TMDB API Key 走直连。
+- **`HostProvider`（复用 MP 刮削通道）能力有限**：只有 MoviePilot 里也没配到可用 TMDB Key 时才会走它；
+  字段映射在不同 MP 版本上未逐一验证，属「尽力而为」，且图片只能取到海报与背景图
+  （`MediaInfo.poster_path` / `backdrop_path`），徽标 / 剧集缩略图 / 季海报拿不到。
 - **首轮图片有流量开销**：库里已有图片需要下载后才能判定是否一致；之后靠指纹清单零下载。
   库特别大时，可以先把「媒体库目录」填成某个子目录分批跑，或先设 `image_mode=missing` 只补空缺。
 - **写回后仍需让媒体服务器刷新**（MP 的「媒体库服务器刷新」插件，或在 Emby/Jellyfin 手动「刷新元数据」）。

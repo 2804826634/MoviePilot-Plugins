@@ -61,19 +61,23 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
     image_mode = off      完全不处理图片（CLI 默认）
     image_mode = missing  只补缺失图片，不动已有图
     image_mode = sync     缺失补齐 + 不一致替换 + 一致跳过（插件默认）
-    覆盖类型：poster / backdrop（+ fanart 别名）/ logo / 剧集缩略图 / 季海报
-    落盘位置（与 MP、Kodi、Jellyfin 约定一致）：
-        电影、剧集目录  poster.jpg / backdrop.jpg / fanart.jpg / logo.png
-        季目录          poster.jpg，同时在剧集根目录写 seasonNN-poster.jpg
-        单集            <视频文件名>.jpg
+    支持的图片类型（共 4 类，另含随「海报」一起处理的季海报）：
+        海报 poster      电影、剧集目录 poster.jpg
+        背景图 backdrop  电影、剧集目录 backdrop.jpg，并额外写一份 fanart.jpg（Kodi/Emby 认这个名）
+        徽标 logo        电影、剧集目录 logo.png
+        剧集缩略图 thumb 单集剧照，写成与该集视频同名的 .jpg（要求该集存在 NFO）
+        季海报           跟随「海报」：季目录 poster.jpg，同时在剧集根目录写 seasonNN-poster.jpg
+    不支持的类型（TMDB 没有这些素材，只有 fanart.tv 提供，需要另申请 Key）：
+        banner / clearart / discart / landscape / characterart
+        也就是说本插件负责「把已有这几类补全并纠错」，不是全画集刮削，
+        需要完整画集可以另叠一个 fanart.tv 类工具，两者不冲突。
     一致的判定靠 image_manifest.json 指纹清单：记录「这张图来自哪个 URL、内容 sha256」，
     因此稳态下零下载即可判定「相同」。首次运行需要下载比对以建立指纹（有流量开销）。
-    banner / clearart / discart / landscape 只有 fanart.tv 提供，不在本插件范围内。
 
 ────────────────────────────────────────────────────────────────────────
-五、与 MoviePilot 的配置联动（留空即自动继承，通常都不用填）
-    TMDB API Key  留空 → 自动读取 MoviePilot 里配置的 TMDB_API_KEY
-    网络代理      留空 → 自动读取 MoviePilot 里配置的 PROXY_HOST
+五、与 MoviePilot 的配置联动（全部自动继承，不用手填）
+    TMDB API Key 自动读取 MoviePilot 里配置的 TMDB_API_KEY；
+    网络代理     自动读取 MoviePilot 里配置的 PROXY_HOST —— 插件里已不再提供代理输入框。
     两者都拿不到时才退回宿主刮削通道（该通道只有海报与背景图）。
 
     分级地区码 决定 NFO 里 <mpaa> 取哪个国家/地区的分级：
@@ -83,9 +87,9 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
 
     演员写入上限 可选 10 / 20 / 30 / 50 / 全部（全部 = 0，不限制）。
 
-    字段白名单（only_fields）与保护字段（protect_fields）的区别：
-        白名单   —— 只管列出的这些字段，其余完全不参与比对（既不补也不换）
-        保护字段 —— 照常参与比对，但只补不换，永远不会覆盖你已有的内容
+    保护字段（protect_fields）：照常参与比对、缺失也会补，但永不覆盖已有内容。
+    （早期版本还有一个「字段白名单」用来收窄处理范围，按用户反馈已移除；
+     该能力仍保留在引擎与 CLI 的 --only 里。）
 
     详情页展示的是「本次修改了哪些文件」表格（含演练/只报告模式下的待改动清单）；
     完整文本报告（含每一条跳过的原因）写在插件数据目录的 last_report.txt。
@@ -170,7 +174,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.4.0"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
@@ -682,6 +686,34 @@ def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
 
 def image_size_for(quality: str, kind: str) -> str:
     return IMG_SIZES.get(quality, IMG_SIZES["standard"]).get(kind, "original")
+
+
+def normalize_image_kinds(raw: Any) -> Optional[List[str]]:
+    """把 image_kinds 的历史各种写法收敛成合法的类型列表。
+
+    历史上这个配置项换过三种载体，必须都能吃下并修好：
+
+    - **布尔值**：v1.2.0 用复选框渲染，而宿主当时把它当单值处理，于是存成了 true / false，
+      界面上就会冒出一个写着 `false` 的怪 chip。这里把 true 视为全选、false 视为全不选。
+    - **列表**：v1.3.0 起多选下拉的载体，直接取其中的合法值（空列表就是空，用户明确关掉）。
+    - **逗号字符串**：最早期的写法，以及 CLI 传参。
+
+    返回 None 表示「压根没配过」（键缺失），由调用方决定默认值。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return list(IMAGE_KINDS) if raw else []
+    if isinstance(raw, (list, tuple, set)):
+        wanted = {str(item).strip().casefold() for item in raw if str(item).strip()}
+        return [kind for kind in IMAGE_KINDS if kind in wanted]
+
+    text = str(raw).strip()
+    if not text:
+        return []
+    wanted = {part.strip().casefold() for part in re.split(r"[,\s]+", text) if part.strip()}
+    picked = [kind for kind in IMAGE_KINDS if kind in wanted]
+    return picked or list(IMAGE_KINDS)      # 整串都没写对时回退全部，避免静默不干活
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1660,24 +1692,24 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _paths: str = ""
     _exclude_paths: str = ""
     _protect_fields: str = ""
-    _only_fields: str = ""
     _respect_lock: bool = True
     _dry_run: bool = False
     _backup: bool = True
     _tmdb_api_key: str = ""
     _language: str = "zh-CN"
-    _proxy: str = ""
     _cert_country: str = "US"
     _cast_limit: str = "20"
     _notify: bool = True
     _image_mode: str = IMG_SYNC
-    _image_kinds: Any = IMAGE_KINDS          # 列表或逗号分隔字符串都接受
+    _image_kinds: Any = IMAGE_KINDS          # 统一由 normalize_image_kinds 收敛成列表
     _image_quality: str = "standard"
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
 
     # ── 生命周期 ───────────────────────────────────────────────────
     def init_plugin(self, config: Optional[dict] = None) -> None:
+        repair: Dict[str, Any] = {}
+
         if config:
             self._enabled = bool(config.get("enabled"))
             self._onlyonce = bool(config.get("onlyonce"))
@@ -1686,25 +1718,32 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._paths = config.get("paths") or ""
             self._exclude_paths = config.get("exclude_paths") or ""
             self._protect_fields = config.get("protect_fields") or ""
-            self._only_fields = config.get("only_fields") or ""
             self._respect_lock = bool(config.get("respect_lock", True))
             self._dry_run = bool(config.get("dry_run"))
             self._backup = bool(config.get("backup", True))
             self._tmdb_api_key = (config.get("tmdb_api_key") or "").strip()
             self._language = config.get("language") or "zh-CN"
-            self._proxy = (config.get("proxy") or "").strip()
             self._cert_country = (config.get("cert_country") or "US").strip()
             self._cast_limit = str(config.get("cast_limit") or "20")
             self._notify = bool(config.get("notify", True))
             self._image_mode = config.get("image_mode") or IMG_SYNC
-            # 图片类型是多选下拉，存成列表；键不存在说明是老配置，按默认全选
-            if "image_kinds" in config:
-                self._image_kinds = config.get("image_kinds")
-            else:
-                self._image_kinds = list(IMAGE_KINDS)
+            # 图片类型：收敛成一个干净的列表；若与存下来的值不同就顺手修正回去，
+            # 否则界面上会一直挂着历史遗留的怪值（例如旧版复选框存下的 false）
+            kinds = normalize_image_kinds(config.get("image_kinds"))
+            self._image_kinds = list(IMAGE_KINDS) if kinds is None else kinds
+            if config.get("image_kinds") != self._image_kinds:
+                repair["image_kinds"] = self._image_kinds
             self._image_quality = config.get("image_quality") or "standard"
 
         self.stop_service()
+
+        # 把历史遗留的非法配置修正回宿主的配置库，避免界面一直显示脏值
+        if repair:
+            try:
+                logger.info(f"已自动修正配置：{repair}")
+                self.update_config(repair)
+            except Exception as exc:
+                logger.warning(f"回写修正后的配置失败（不影响本次运行）：{exc}")
 
         if self._onlyonce:
             logger.info("NFO 差异比对：立即运行一次")
@@ -1828,7 +1867,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                         {"title": "海报（poster.jpg）", "value": "poster"},
                                         {"title": "背景图（backdrop.jpg + fanart.jpg）", "value": "backdrop"},
                                         {"title": "徽标（logo.png）", "value": "logo"},
-                                        {"title": "剧集缩略图（与视频同名的 .jpg）", "value": "thumb"},
+                                        {"title": "剧集缩略图（单集剧照 → 与视频同名的 .jpg）", "value": "thumb"},
                                     ]}}]},
                         ],
                     },
@@ -1837,14 +1876,31 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "上面这项决定要处理哪些图片：全部不选就是「不处理任何图片」，"
-                                         "等同于把图片处理关掉（不会偷偷回退成全部）。"
-                                         "「季海报」跟随「海报」一起处理：写在季目录 poster.jpg，"
-                                         "并同步一份到剧集根目录 seasonNN-poster.jpg。"
-                                         "图片沿用与 NFO 相同的「一致才跳过」逻辑：先比对本地图与在线图，"
+                                 "text": "勾选的类型会写成什么（命名与 Kodi / Jellyfin 约定一致）："
+                                         "① 海报 → 电影/剧集目录 poster.jpg；"
+                                         "② 背景图 → backdrop.jpg，并额外写一份 fanart.jpg（Kodi/Emby 认这个名）；"
+                                         "③ 徽标 → logo.png；"
+                                         "④ 剧集缩略图 → 单集剧照，写成与该集视频同名的 .jpg（要求该集存在 NFO）。"
+                                         "季海报不单独成项，跟随「海报」一起处理：写季目录 poster.jpg，"
+                                         "同时在剧集根目录同步一份 seasonNN-poster.jpg。"
+                                         "全部不选 = 不处理任何图片（等于关掉图片处理，不会偷偷回退成全选）。"
+                                         "判定沿用与 NFO 相同的「一致才跳过」逻辑：先比对本地图与在线图，"
                                          "一致不动、不一致才替换 —— 官方「媒体库刮削」只判断文件在不在，"
                                          "所以低清图、错图永远不会被换掉。首次运行需要下载比对以建立指纹，"
-                                         "之后靠指纹零下载判定。剧集缩略图要求该集存在 NFO。"}]},
+                                         "之后靠指纹零下载判定。"}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
+                                 "text": "本插件只做上面这 4 类 + 季海报。TMDB 本身只提供"
+                                         "海报 / 背景图 / 徽标 / 剧照（still）这几种素材，"
+                                         "所以 banner、clearart、discart、landscape、characterart "
+                                         "这些画集**无法支持** —— 它们只有 fanart.tv 提供，需要另外申请该站 API Key。"
+                                         "换句话说：本插件负责「把已有这几类补全并纠错」，不是全画集刮削；"
+                                         "需要完整画集可以再叠加一个 fanart.tv 类工具，两者不冲突。"}]},
                         ],
                     },
                     {
@@ -1908,35 +1964,17 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "only_fields",
-                                    "label": "字段白名单（只处理列出的字段）",
-                                    "placeholder": "留空 = 处理全部；例如 plot,rating,actor"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "proxy",
-                                    "label": "网络代理（留空 = 自动沿用 MoviePilot 里的代理）",
-                                    "placeholder": "http://192.168.1.2:7890"}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「字段白名单」和「保护字段」是两件不同的事，容易混："
-                                         "白名单是「只管这些」—— 列出以外的字段完全不参与比对，既不补也不换，"
-                                         "相当于把一个媒体库的维护范围缩小到你关心的几项；"
-                                         "保护字段是「照常比对，但只补不换」—— 仍会参与比对、缺失会补，"
-                                         "只是永远不覆盖你已有的内容。"
-                                         "两者可以同时用。字段名要写 NFO 的标签名（小写、逗号分隔），"
-                                         "电影可用：title, originaltitle, plot, tagline, year, premiered, "
+                                 "text": "「保护字段」= 照常参与比对、缺失也会补，但**永远不会覆盖你已有的内容**。"
+                                         "想保住手工润色的简介、自己写的一句话宣传语，就把对应字段填进来。"
+                                         "字段名写 NFO 的标签名（小写、逗号分隔）："
+                                         "电影可用 title, originaltitle, plot, tagline, year, premiered, "
                                          "runtime, mpaa, rating, genre, studio, country, director, credits, actor；"
-                                         "剧集 tvshow 可用：title, plot, tagline, year, premiered, runtime, mpaa, "
+                                         "剧集 tvshow 可用 title, plot, tagline, year, premiered, runtime, mpaa, "
                                          "rating, genre, studio, country, actor；"
-                                         "单集可用：title, plot, aired, rating, season, episode, director, credits, actor；"
-                                         "季可用：title, plot, premiered, season。"}]},
+                                         "单集可用 title, plot, aired, rating, season, episode, director, credits, actor；"
+                                         "季可用 title, plot, premiered, season。"}]},
                         ],
                     },
                     {
@@ -1944,9 +1982,10 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「TMDB API Key」与「网络代理」留空时会自动读取 MoviePilot 里已配置的值，"
-                                         "所以多数情况下两项都不用填。只有当 MoviePilot 里也没有可用的 Key 时，"
-                                         "才会退回宿主的刮削通道（该通道拿不到剧集缩略图、季海报和徽标）。"}]},
+                                 "text": "「TMDB API Key」留空时会自动读取 MoviePilot 里已配置的 Key，"
+                                         "网络代理也会自动沿用 MoviePilot 的 PROXY_HOST —— "
+                                         "所以这里通常什么都不用填。只有当 MoviePilot 里也没有可用的 Key 时，"
+                                         "才会退回宿主的刮削通道（该通道拿不到徽标、剧集缩略图和季海报）。"}]},
                         ],
                     },
                     {
@@ -2020,10 +2059,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "paths": "",
             "exclude_paths": "",
             "protect_fields": "",
-            "only_fields": "",
             "tmdb_api_key": "",
             "language": "zh-CN",
-            "proxy": "",
             "cert_country": "US",
             "cast_limit": "20",
             "image_mode": IMG_SYNC,
@@ -2196,10 +2233,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "paths": self._paths,
                 "exclude_paths": self._exclude_paths,
                 "protect_fields": self._protect_fields,
-                "only_fields": self._only_fields,
                 "tmdb_api_key": self._tmdb_api_key,
                 "language": self._language,
-                "proxy": self._proxy,
                 "cert_country": self._cert_country,
                 "cast_limit": self._cast_limit,
                 "image_mode": self._image_mode,
@@ -2247,19 +2282,18 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     def __build_provider(self):
         quality = self._image_quality if self._image_quality in IMG_SIZES else "standard"
         limit = self.__int(self._cast_limit, 20)
-        # Key 与代理：插件里填了就用插件的，否则自动沿用 MoviePilot 里配置的值
+        # Key 与代理都自动沿用 MoviePilot 的配置（插件里已不再提供这两项的输入框）
         own_key = (self._tmdb_api_key or "").strip()
-        own_proxy = (self._proxy or "").strip()
         key = own_key or str(mp_setting("TMDB_API_KEY", "") or "").strip()
-        proxy = own_proxy or str(mp_setting("PROXY_HOST", "") or "").strip()
+        proxy = str(mp_setting("PROXY_HOST", "") or "").strip()
         if key:
             logger.info("TMDB 数据源：%s%s" % (
                 "插件内单独配置的 API Key" if own_key else "自动读取 MoviePilot 中配置的 API Key",
-                ("，代理沿用宿主的" if (proxy and not own_proxy) else "")))
+                "，代理沿用宿主的" if proxy else ""))
             return TmdbProvider(key, self._language, proxy or None,
                                 self._cert_country, limit, quality)
         logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
-                       "（该通道只能取到海报与背景图，剧集缩略图 / 季海报 / 徽标将不可用）")
+                       "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
         return HostProvider(quality, limit)
 
     @staticmethod
@@ -2278,28 +2312,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
         return {item.strip().casefold() for item in re.split(r"[,\s]+", text or "") if item.strip()}
 
     def __image_kinds_set(self) -> set:
-        """解析「处理的图片类型」。
-
-        表单里是多选下拉（存成列表），老配置与 CLI 传的是逗号分隔字符串，两种都要能吃下。
-        「空」的含义按载体区分，但都归结为「用户明确关掉了图片」，绝不偷偷回退成全部：
-
-        - 列表为空 / `None`（多选被清空，宿主可能存成 null）→ 空集合
-        - 空字符串 → 空集合
-        - 字符串有值但一个都没解析对 → 大概率是手写错字，回退全部，避免静默什么都不做
-        """
-        raw = self._image_kinds
-        if raw is None:
-            return set()
-        if isinstance(raw, (list, tuple, set)):
-            picked = {str(item).strip().casefold() for item in raw if str(item).strip()}
-            return picked & set(IMAGE_KINDS)
-
-        text = str(raw).strip()
-        if not text:
-            return set()
-        picked = {item.strip().casefold()
-                  for item in re.split(r"[,\s]+", text) if item.strip()}
-        return (picked & set(IMAGE_KINDS)) or set(IMAGE_KINDS)
+        """当前生效的图片类型集合（统一走 normalize_image_kinds 收敛）。"""
+        return set(normalize_image_kinds(self._image_kinds) or [])
 
     def __run(self) -> None:
         try:
@@ -2317,7 +2331,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 root_types=root_types,
                 mode=self._mode if self._mode in ("report", "gapfill", "sync", "force") else "sync",
                 protect_fields=self.__split_set(self._protect_fields),
-                only_fields=self.__split_set(self._only_fields),
+                only_fields=set(),    # 插件已移除「字段白名单」（引擎与 CLI 的 --only 仍保留该能力）
                 respect_lock=self._respect_lock,
                 dry_run=self._dry_run,
                 backup=self._backup,

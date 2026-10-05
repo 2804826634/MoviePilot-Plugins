@@ -120,7 +120,7 @@ check("get_form 返回 (页面JSON, 默认配置) 二元组",
 defaults = form[1]
 expected_keys = {"enabled", "onlyonce", "notify", "mode", "cron", "dry_run", "respect_lock",
                  "backup", "paths", "exclude_paths", "protect_fields",
-                 "only_fields", "tmdb_api_key", "language", "proxy", "cert_country", "cast_limit",
+                 "tmdb_api_key", "language", "cert_country", "cast_limit",
                  "image_mode", "image_kinds", "image_quality"}
 check("默认配置包含全部配置项", expected_keys <= set(defaults),
       f"缺少 {expected_keys - set(defaults)}")
@@ -144,7 +144,13 @@ check("图片类型改为多选下拉框（multiple + chips），不再用只能
 check("图片类型选项为中文，并标注落盘文件名",
       all(f"'title': '{title}'" in form_json for title in
           ("海报（poster.jpg）", "背景图（backdrop.jpg + fanart.jpg）",
-           "徽标（logo.png）", "剧集缩略图（与视频同名的 .jpg）")))
+           "徽标（logo.png）", "剧集缩略图（单集剧照 → 与视频同名的 .jpg）")))
+check("图片说明里写全了 4 类落盘文件名与季海报的连带行为",
+      all(name in form_json for name in
+          ("poster.jpg", "backdrop.jpg", "fanart.jpg", "logo.png", "seasonNN-poster.jpg")))
+check("图片说明里写明了不支持的类型及原因（TMDB 没有，只有 fanart.tv 提供）",
+      all(name in form_json for name in
+          ("banner", "clearart", "discart", "landscape", "characterart", "fanart.tv")))
 check("图片类型默认全选", sorted(defaults["image_kinds"]) == sorted(module.IMAGE_KINDS))
 check("演员写入上限改为下拉选项，且含「全部」",
       "'model': 'cast_limit'" in form_json
@@ -157,10 +163,13 @@ check("全表单只有图片类型是多选（分级地区码保持单选）",
       form_json.count("'multiple': True") == 1)
 check("分级地区码给了完整说明（mpaa 与各地区分级差异）",
       "分级地区码」怎么填" in form_json and "PG-13" in form_json)
-check("字段白名单给了说明，并讲清了与保护字段的区别",
-      "字段白名单」和「保护字段」是两件不同的事" in form_json)
-check("已写明 TMDB Key / 代理留空会自动沿用 MoviePilot 的配置",
-      "自动读取 MoviePilot 里已配置的值" in form_json)
+check("「字段白名单」与「网络代理」已从配置项中移除",
+      "only_fields" not in defaults and "proxy" not in defaults
+      and "'model': 'only_fields'" not in form_json and "'model': 'proxy'" not in form_json)
+check("保护字段的说明保留，并列出了各类型可用字段名",
+      "「保护字段」= 照常参与比对" in form_json and "premiered" in form_json)
+check("已写明 TMDB Key 留空会自动读取 MoviePilot 的配置、代理自动沿用 PROXY_HOST",
+      "自动读取 MoviePilot 里已配置的 Key" in form_json and "PROXY_HOST" in form_json)
 
 # 图片类型解析：列表（多选下拉）与字符串（老配置 / CLI）两种载体
 def kinds_of(value):
@@ -174,6 +183,25 @@ check("多选被清空（[] / null / 空串）= 不处理任何图片（不会�
 check("老配置的逗号字符串仍兼容", kinds_of("poster, backdrop") == {"poster", "backdrop"})
 check("字符串写错时回退全部（避免手写错字导致静默不干活）",
       kinds_of("posterr") == set(module.IMAGE_KINDS))
+
+# 回归：v1.2.0 的单选复选框把 image_kinds 存成了布尔，界面上冒出一个 `false` chip
+check("旧版复选框存下的布尔值能被修好（true = 全选，false = 全不选）",
+      kinds_of(True) == set(module.IMAGE_KINDS) and kinds_of(False) == set())
+check("normalize_image_kinds 对各类脏数据都返回干净列表",
+      module.normalize_image_kinds(False) == []
+      and module.normalize_image_kinds(True) == list(module.IMAGE_KINDS)
+      and module.normalize_image_kinds(None) is None
+      and module.normalize_image_kinds(["poster", "bogus"]) == ["poster"]
+      and module.normalize_image_kinds("logo,thumb") == ["logo", "thumb"])
+check("修复结果只含合法值（界面不会再冒出 false 这种 chip）",
+      all(k in module.IMAGE_KINDS for k in
+          (module.normalize_image_kinds(False) or []) + module.normalize_image_kinds(True)))
+
+# init_plugin 还会把修正结果回写配置库，否则界面会一直挂着脏值
+repair_plugin = module.NfoGapFill()
+repair_plugin.init_plugin({**defaults, "image_kinds": False})
+check("init_plugin 把布尔脏值收敛成空列表", repair_plugin._image_kinds == [])
+check("并把修正结果回写进配置库", repair_plugin.get_config().get("image_kinds") == [])
 
 # 媒体库目录的 #类型 限定
 roots, types = module.parse_root_specs(["/m/电影#电影", "/m/剧集#电视剧", "/m/其它"])
