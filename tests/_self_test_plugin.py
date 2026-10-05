@@ -146,9 +146,11 @@ check("图片类型选项为中文，并标注落盘文件名",
       all(f"'title': '{title}'" in form_json for title in
           ("海报（poster.jpg）", "背景图（backdrop.jpg + fanart.jpg）",
            "徽标（logo.png）", "剧集缩略图（单集剧照 → 与视频同名的 .jpg）")))
-check("图片说明里写全了 4 类落盘文件名与季海报的连带行为",
+check("图片说明里写全了落盘文件名，并写明季海报只写季目录",
       all(name in form_json for name in
-          ("poster.jpg", "backdrop.jpg", "fanart.jpg", "logo.png", "seasonNN-poster.jpg")))
+          ("poster.jpg", "backdrop.jpg", "fanart.jpg", "logo.png"))
+      and "只写该季目录下的 poster.jpg" in form_json
+      and "seasonNN-poster.jpg" not in form_json)
 check("图片类型默认全选", sorted(defaults["image_kinds"]) == sorted(module.IMAGE_KINDS))
 check("图片类型已扩到 8 类，且标注了数据来源（TMDB + fanart.tv）",
       all(f"'title': '{t}'" in form_json for t in
@@ -770,8 +772,9 @@ xiang_season, _ = xiang_engine.resolve_season_episode(xiang_loaded, "season")
 check("① 中文目录「第一季」解析为第 1 季（不再是未知 → 0）", xiang_season == "1", str(xiang_season))
 xiang_names = {path.name for _, path in
                module.image_targets(xiang_loaded, {"poster"}, season=xiang_season)}
-check("② 落盘名是 season01-poster.jpg，绝不会出现 season00",
-      "season01-poster.jpg" in xiang_names and not any("season00" in n for n in xiang_names),
+check("② 季海报目标名就是 poster.jpg（且不产生任何 seasonNN-poster 变体）",
+      xiang_names == {"poster.jpg"}
+      and not any(n.startswith("season") and "poster" in n for n in xiang_names),
       str(sorted(xiang_names)))
 
 # 季号确实解析不出来时：宁可不写季专用名，也不写 season00
@@ -780,6 +783,76 @@ unknown = module.NfoFile(path=DATA_PATH / "dirid" / "未知季" / "season.nfo", 
 unknown_names = {path.name for _, path in module.image_targets(unknown, {"poster"})}
 check("③ 季号未知时跳过季专用文件名（只留季目录里的 poster.jpg）",
       unknown_names == {"poster.jpg"}, str(sorted(unknown_names)))
+
+print()
+print("=" * 70)
+print("季海报落盘规则：一季一图、各归其位（用户明确要求）")
+print("=" * 70)
+season_root = DATA_PATH / "seasonlib"
+show_dir = season_root / "电视剧" / "某剧 (2016) {tmdbid=66732}"
+season_dir = show_dir / "Season 01"
+season_dir.mkdir(parents=True, exist_ok=True)
+(show_dir / "tvshow.nfo").write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<tvshow>\n'
+    '  <title>某剧</title>\n  <tmdbid>66732</tmdbid>\n</tvshow>\n', encoding="utf-8")
+(season_dir / "season.nfo").write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<season>\n'
+    '  <title>第 1 季</title>\n  <season>1</season>\n</season>\n', encoding="utf-8")
+
+img_dir = DATA_PATH / "season_images"
+img_dir.mkdir(parents=True, exist_ok=True)
+shutil.copy(FIX.parent / "images" / "season1.png", img_dir / "season1.png")
+
+season_cache = DATA_PATH / "season_cache.json"
+season_cache.write_text(json.dumps({
+    "season:66732:1": {"title": ["第 1 季"], "season": ["1"]},
+    "images:season:66732:1": {"poster": str(img_dir / "season1.png")},
+}, ensure_ascii=False), encoding="utf-8")
+
+# 同一条目，但在线没有任何图片素材（用来验证「明确标注缺失、不回退」）
+season_cache_none = DATA_PATH / "season_cache_none.json"
+season_cache_none.write_text(json.dumps({
+    "season:66732:1": {"title": ["第 1 季"], "season": ["1"]},
+}, ensure_ascii=False), encoding="utf-8")
+
+
+def run_season(tag, cache=None):
+    cfg = module.EngineConfig(roots=[season_root], mode="sync", image_mode="sync",
+                              image_kinds={"poster"},
+                              manifest_path=DATA_PATH / f"season_{tag}.json")
+    return module.Engine(cfg, module.FileProvider(str(cache or season_cache))).run()
+
+
+def root_season_posters():
+    return sorted(p.name for p in show_dir.iterdir()
+                  if p.name.startswith("season") and p.name.endswith("-poster.jpg"))
+
+
+# 正常匹配到在线季海报 → 只写季目录里那份
+report_a = run_season("a")
+check("① 季海报写入季目录：Season 01/poster.jpg",
+      (season_dir / "poster.jpg").exists(), str(sorted(p.name for p in season_dir.iterdir())))
+check("② 剧集根目录里不会出现 seasonNN-poster.jpg（不再集中堆放）",
+      root_season_posters() == [], str(root_season_posters()))
+
+# 旧版残留：只检测 + 提示，绝不擅自删除用户的文件
+legacy_file = show_dir / "season01-poster.jpg"
+shutil.copy(FIX.parent / "images" / "poster_wrong.png", legacy_file)
+report_b = run_season("b")
+check("③ 旧版残留被检测并记入报告，且文件仍在（不擅自删除）",
+      report_b.legacy_alias >= 1 and legacy_file.exists(), f"legacy={report_b.legacy_alias}")
+legacy_file.unlink()
+
+# 该季在线没有任何图片素材 → 明确标注缺失，且绝不回退用剧集/别季海报
+(season_dir / "poster.jpg").unlink()
+report_c = run_season("c", cache=season_cache_none)
+check("④ 该季在线无海报时明确标注缺失（不是静默跳过）",
+      report_c.images_missing >= 1, f"images_missing={report_c.images_missing}")
+check("④ 也不会回退：季目录里不会凭空出现 poster.jpg",
+      sorted(p.name for p in season_dir.iterdir()) == ["season.nfo"],
+      str(sorted(p.name for p in season_dir.iterdir())))
+check("④ 报告里能读到这条缺失说明",
+      "在线没有海报" in report_c.to_text(), report_c.to_text()[-300:])
 
 print()
 print("=" * 70)
@@ -1053,12 +1126,10 @@ season_tree = ET.ElementTree(ET.fromstring("<season><season>1</season></season>"
 season_nfo = module.NfoFile(path=Path("电视剧") / "怪奇物语 (2016)" / "Season 01" / "season.nfo",
                             media_type="season", tree=season_tree)
 season_targets = module.image_targets(season_nfo, {"poster"})
-check("季海报同时落季目录 poster.jpg 与剧集根目录 season01-poster.jpg",
-      len(season_targets) == 2
+check("季海报**只**落季目录 poster.jpg（不再往剧集根目录写 seasonNN-poster.jpg）",
+      len(season_targets) == 1
       and season_targets[0][1].name == "poster.jpg"
-      and season_targets[0][1].parent.name == "Season 01"
-      and season_targets[1][1].name == "season01-poster.jpg"
-      and season_targets[1][1].parent.name == "怪奇物语 (2016)")
+      and season_targets[0][1].parent.name == "Season 01", str(season_targets))
 check("按 kinds 过滤生效（只要 poster 时不产出 backdrop）",
       all(spec.kind == "poster" for spec, _ in season_targets))
 episode_tree = ET.ElementTree(ET.fromstring("<episodedetails><season>2</season></episodedetails>"))

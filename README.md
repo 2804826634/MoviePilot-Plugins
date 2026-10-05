@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.6.3-blue)
+![version](https://img.shields.io/badge/version-1.7.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -88,7 +88,10 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 | 光盘图（disc） | `disc.png` | 电影、剧集目录 | **fanart.tv** `moviedisc` |
 | 透明艺术图（clearart） | `clearart.png` | 电影、剧集目录 | **fanart.tv** `hdmovieclearart` 等 |
 | 横版缩略图（landscape） | `landscape.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviethumb` / `tvthumb` |
-| 季海报 | `<季目录>/poster.jpg` **+** `<剧集根目录>/seasonNN-poster.jpg` | 季 | TMDB `posters`（**跟随「海报」一起处理，不单独成项**） |
+| 季海报 | **`<季目录>/poster.jpg`（只此一处）** | 季 | TMDB `posters`（**跟随「海报」一起处理，不单独成项**） |
+
+> **季海报的落盘规则（v1.7.0 起）**：一季一图、各归其位 —— 只写在该季自己的目录里，统一命名为 `poster.jpg`；**不再往剧集根目录写 `seasonNN-poster.jpg`**（那会把各季海报堆到同一个目录）。
+> 某一季在线没有海报时会**明确标注缺失**（报告里显示「N 季在线没有海报，已跳过」），并且**绝不回退**用剧集海报或其它季的海报顶替。
 
 ### fanart.tv 那几类怎么配置
 
@@ -364,13 +367,13 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 无需联网、无需 TMDB Key，纯标准库：
 
 ```bash
-python tests/_self_test.py          # 引擎行为 61 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性）
-python tests/_self_test_plugin.py   # 插件面 175 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试）
+python tests/_self_test.py          # 引擎行为 62 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季海报落位）
+python tests/_self_test_plugin.py   # 插件面 181 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试/季海报落盘规则）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
 二次运行幂等（零写入）、保护字段生效、`gapfill` 模式不替换、表单控件与默认配置一一对应、端到端出报告并发通知；
-图片部分另外覆盖：缺失补齐、`fanart` 别名同内容、季海报双落点、单集缩略图命名、
+图片部分另外覆盖：缺失补齐、`fanart` 别名同内容、季海报只落季目录、单集缩略图命名、
 指纹匹配零下载幂等、错图被替换且原图入备份、`image_mode=missing/off` 行为、
 `lockdata` 连图片一起锁、TMDB 选图策略（语言 → 分辨率 → 评分）、尺寸档位按类型区分。
 
@@ -380,7 +383,7 @@ python tests/_self_test_plugin.py   # 插件面 175 项断言（伪造 MP 宿主
 
 - **电影**（`movie.nfo` / 同名 NFO）：`title`、`originaltitle`、`plot`、`tagline`、`year`、`premiered`、`runtime`、`mpaa`、`rating`、`genre`、`studio`、`country`、`director`、`credits`、`actor`，以及 `uniqueid[tmdb]` / `tmdbid`
 - **剧集**：`tvshow.nfo`、`season.nfo`、单集 NFO（`episodedetails`）
-- **图片**：`poster`（海报）、`backdrop`（背景图，含 `fanart` 别名）、`logo`（徽标）、`thumb`（剧集缩略图）、季海报
+- **图片**：`poster`（海报）、`backdrop`（背景图，含 `fanart` 别名）、`logo`（徽标）、`thumb`（剧集缩略图）、季海报（只在季目录内）
 
 ---
 
