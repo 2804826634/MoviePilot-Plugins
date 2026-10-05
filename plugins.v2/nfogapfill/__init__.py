@@ -1,69 +1,80 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NfoGapFill —— NFO 元数据「差异比对 → 按需替换」工具（MoviePilot 插件 / 独立 CLI 双模式）
+NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工具（MoviePilot 插件 / 独立 CLI 双模式）
 
 它解决什么问题
-    MoviePilot 官方「媒体库刮削」插件的覆盖模式只有两档：
-        · 不覆盖已有元数据   —— 只要字段非空就一律不动，不管它是不是错的/旧的
-        · 覆盖所有元数据和图片 —— 连你手工润色的简介、自定义 tag 一起冲掉
+    MoviePilot 官方「媒体库刮削」插件对「已有文件」只有两档处理：
+        · 不覆盖已有元数据   —— 只要字段非空 / 图片文件存在就一律不动，不管它是错的还是旧的
+        · 覆盖所有元数据和图片 —— 连你手工润色的简介、自定义 tag、精挑的封面一起冲掉
+    它的判定依据只有「文件在不在」（app/chain/media.py 的 _should_scrape），
+    所以一张低清封面、错语言的 logo 会永远留在库里。
     本插件补上中间那一档，并且是默认行为：
         · 缺失            → 补齐
         · 与在线数据不一致 → 替换
         · 与在线数据一致   → 跳过（不产生任何写入，不改动文件 mtime）
-    另外支持三层保护：NFO 内 lockdata/lockedfields、插件配置的「保护字段」、只报告模式。
+    NFO 字段与图片共用这套判定；图片另外靠「指纹清单」在稳态下零下载地判定一致。
+    三层保护：NFO 内 lockdata/lockedfields、插件配置的「保护字段」、只报告模式。
 
 ────────────────────────────────────────────────────────────────────────
-一、作为 MoviePilot 插件部署（推荐：方式 A 最省事）
+一、作为 MoviePilot 插件部署（推荐：从插件市场装）
 
-  方式 A：直接放入插件目录
-      1) 把本文件拷进容器：
-         docker cp NfoGapFill.py moviepilot-v2:/config/NfoGapFill.py
-      2) 找到插件目录真实路径（不同镜像/版本可能是 /app/app/plugins 或 /app/plugins）：
-         docker exec -it moviepilot-v2 python -c "import app.plugins,os;print(os.path.dirname(app.plugins.__file__))"
-      3) 移进去并重启容器：
-         docker exec -it moviepilot-v2 mv /config/NfoGapFill.py <上一步输出的目录>/
-         docker restart moviepilot-v2
-      4) 打开 MoviePilot → 设定 → 插件，在「已安装」里找到「NFO 差异比对与补齐」。
+    docker-compose.yml 里把本仓库追加到插件市场（不要覆盖官方市场）：
+        environment:
+          - PLUGIN_MARKET=jxxghp/MoviePilot-Plugins,2804826634/moviepilot-nfo-gapfill
+    重启容器后，插件市场搜「NFO」即可安装。
 
-  方式 B：本地插件仓库（持久化，容器重建/升级不丢）
-      1) 在宿主机建目录并放入本文件，文件名必须是插件 ID（类名）NfoGapFill.py：
-         /your/appdata/mp_plugins/NfoGapFill.py
-      2) docker-compose.yml 增加挂载与环境变量：
-         volumes:
-           - /your/appdata/mp_plugins:/mp_plugins
-         environment:
-           - PLUGIN_LOCAL_REPO_PATHS=/mp_plugins
-      3) 重启容器，插件市场会多出「本地仓库」来源，可正常安装/卸载。
-
-  注意：升级 MoviePilot 镜像后 /app 内的文件会被重置，方式 A 需要重新执行一次；
-        长期使用建议方式 B，或把自己的仓库推到 GitHub 后用 PLUGIN_MARKET 安装。
+  也可以单文件手动放入（升级镜像会丢，需重做）：
+        docker cp plugins.v2/nfogapfill/__init__.py moviepilot-v2:/config/NfoGapFill.py
+        docker exec -it moviepilot-v2 python -c "import app.plugins,os;print(os.path.dirname(app.plugins.__file__))"
+        docker exec -it moviepilot-v2 mv /config/NfoGapFill.py <上一步输出的目录>/
+        docker restart moviepilot-v2
+      注意文件名必须是插件 ID（类名）NfoGapFill.py。
 
 ────────────────────────────────────────────────────────────────────────
 二、作为独立命令行工具（先在电脑上验证策略，再上 NAS）
 
-    # 体检：只统计本地 NFO 有哪些字段缺失 / 与在线数据不一致（需要联网）
-    python NfoGapFill.py --root /media/link --source tmdb --api-key XXX --diff
+    # 体检：只报告差异，不写盘
+    python NfoGapFill.py --root /media/link --source tmdb --api-key XXX
 
     # 离线演练：用本地 JSON 模拟在线数据，不联网也能验证比对逻辑
-    python NfoGapFill.py --root /media/link --source file --cache remote.json --diff
+    python NfoGapFill.py --root /media/link --source file --cache remote.json
 
     # 正式执行（先加 --dry-run 看一遍，再去掉）
     python NfoGapFill.py --root /media/link --source tmdb --api-key XXX --mode sync --fix
 
+    # 连图片一起处理（CLI 里图片默认关闭，插件里默认开启）
+    python NfoGapFill.py --root /media/link --source tmdb --api-key XXX \
+                         --mode sync --fix --image-mode sync
+
    CLI 与插件调用的是完全同一套引擎，CLI 上验证通过的行为就是插件的实际行为。
 
 ────────────────────────────────────────────────────────────────────────
-三、四种运行模式
+三、四种运行模式（NFO 字段与图片共用）
     report   只报告差异，一个字节都不写
     gapfill  只补缺失（等价官方插件的「不覆盖已有元数据」）
     sync     缺失补齐 + 不一致替换 + 一致跳过   ← 默认，本插件的存在意义
     force    无条件用在线数据覆盖全部受管字段（等价官方插件的 force_all）
+
+────────────────────────────────────────────────────────────────────────
+四、图片处理（独立开关，与上面四种模式正交）
+    image_mode = off      完全不处理图片（CLI 默认）
+    image_mode = missing  只补缺失图片，不动已有图
+    image_mode = sync     缺失补齐 + 不一致替换 + 一致跳过（插件默认）
+    覆盖类型：poster / backdrop（+ fanart 别名）/ logo / 剧集缩略图 / 季海报
+    落盘位置（与 MP、Kodi、Jellyfin 约定一致）：
+        电影、剧集目录  poster.jpg / backdrop.jpg / fanart.jpg / logo.png
+        季目录          poster.jpg，同时在剧集根目录写 seasonNN-poster.jpg
+        单集            <视频文件名>.jpg
+    一致的判定靠 image_manifest.json 指纹清单：记录「这张图来自哪个 URL、内容 sha256」，
+    因此稳态下零下载即可判定「相同」。首次运行需要下载比对以建立指纹（有流量开销）。
+    banner / clearart / discart / landscape 只有 fanart.tv 提供，不在本插件范围内。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -129,11 +140,32 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
-IMG_BASE = "https://image.tmdb.org/t/p/original"
+IMG_BASE = "https://image.tmdb.org/t/p/original"      # 演员头像等原始尺寸直链
+IMG_HOST = "https://image.tmdb.org/t/p/"              # 图片地址前缀（后面跟尺寸 token）
+
+# 画质档位 → 各图片类型请求的 TMDB 尺寸。
+# 必须按类型分别取：TMDB 不同图片类型支持的尺寸集合不一样（logo 最大只到 w500，
+# 拿 backdrop 的 w1280 去请求 logo 会取不到图）。
+IMG_SIZES: Dict[str, Dict[str, str]] = {
+    "standard": {"poster": "w780", "backdrop": "w1280", "logo": "w500", "thumb": "w300"},
+    "original": {"poster": "original", "backdrop": "original",
+                 "logo": "original", "thumb": "original"},
+}
+
+# TMDB /images 接口响应里的数组名
+IMG_API_KEYS: Dict[str, str] = {"poster": "posters", "backdrop": "backdrops",
+                                "logo": "logos", "thumb": "stills"}
+
+IMAGE_KINDS: Tuple[str, ...] = ("poster", "backdrop", "logo", "thumb")
+IMAGE_KIND_CN = {"poster": "海报", "backdrop": "背景图", "logo": "徽标", "thumb": "剧集缩略图"}
+
+IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
+
+UA = f"NfoGapFill/{PLUGIN_VERSION} (+MoviePilot plugin)"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -376,7 +408,175 @@ def write_nfo_file(nfo: NfoFile, backup_root: Optional[Path], root_dir: Path) ->
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 在线数据源：统一产出 {字段名: [字符串]}
+# 图片规格与落盘
+#   命名遵循 MP / Kodi / Jellyfin 共同认可的约定（对照 MP 的
+#   app/chain/media.py 里 IMAGE_ALIASES 与季目录 naming 规则），列在这里以免写错：
+#     · 电影 / 剧集目录：poster.jpg、backdrop.jpg（+ fanart.jpg 别名）、logo.png
+#     · 季目录：poster.jpg；剧集根目录再写一份 seasonNN-poster.jpg（Kodi 约定）
+#     · 单集：<视频文件名>.jpg，与 MP 的写法一致，放在视频同级目录
+#   注意：TMDB 只提供 poster / backdrop / logo / still 四类；
+#   banner、clearart、discart、landscape 需要 fanart.tv，不在本插件范围内。
+# ══════════════════════════════════════════════════════════════════════
+@dataclass(frozen=True)
+class ImageSpec:
+    kind: str                 # poster / backdrop / logo / thumb
+    name: str                 # 目标文件名模板，可用 {stem} / {season}
+    alias: bool = False       # 与同 kind 的主图内容相同，只是多写一份别名文件
+    in_parent: bool = False   # 落到上级目录（Kodi 的 seasonNN-poster.jpg 约定）
+
+
+IMAGE_SPECS: Dict[str, List[ImageSpec]] = {
+    "movie": [
+        ImageSpec("poster", "poster.jpg"),
+        ImageSpec("backdrop", "backdrop.jpg"),
+        ImageSpec("backdrop", "fanart.jpg", alias=True),        # Kodi / Emby 认 fanart
+        ImageSpec("logo", "logo.png"),
+    ],
+    "tvshow": [
+        ImageSpec("poster", "poster.jpg"),
+        ImageSpec("backdrop", "backdrop.jpg"),
+        ImageSpec("backdrop", "fanart.jpg", alias=True),
+        ImageSpec("logo", "logo.png"),
+    ],
+    "season": [
+        ImageSpec("poster", "poster.jpg"),
+        ImageSpec("poster", "season{season:0>2}-poster.jpg", alias=True, in_parent=True),
+    ],
+    "episodedetails": [
+        ImageSpec("thumb", "{stem}.jpg"),
+    ],
+}
+
+
+def image_targets(nfo: NfoFile, kinds: set) -> List[Tuple[ImageSpec, Path]]:
+    """算出这个 NFO 对应的全部图片落盘路径。"""
+    specs = IMAGE_SPECS.get(nfo.media_type, [])
+    if not specs:
+        return []
+    season_text = norm_text(nfo.root.findtext("season")) or ""
+    try:
+        season_num = int(re.sub(r"\D", "", season_text) or 0)
+    except ValueError:
+        season_num = 0
+    out: List[Tuple[ImageSpec, Path]] = []
+    for spec in specs:
+        if spec.kind not in kinds:
+            continue
+        name = spec.name.format(stem=nfo.path.stem, season=season_num)
+        base = nfo.path.parent.parent if spec.in_parent else nfo.path.parent
+        out.append((spec, base / name))
+    return out
+
+
+def sha256_file(path: Path) -> Optional[str]:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+
+class ImageManifest:
+    """记录「这张本地图片来自哪个在线地址、内容指纹是什么」。
+
+    有了它，稳态下才能在不下载的前提下判定「相同」—— 这正是官方插件做不到的：
+    它只看文件在不在（`_should_scrape` 里 `file_exists` 一票否决），
+    所以一张错图、低清图会永远留在库里。
+    """
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = Path(path) if path else None
+        self.data: Dict[str, Dict[str, Any]] = {}
+        self.dirty = False
+        if self.path and self.path.exists():
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    self.data = loaded
+            except Exception as exc:
+                logger.warning(f"读取图片指纹清单失败，将重建：{exc}")
+
+    @staticmethod
+    def key(path: Path) -> str:
+        return str(path).replace("\\", "/")
+
+    def matches(self, path: Path, url: str) -> bool:
+        """清单能否证明「本地这张图就是该在线图」——能则不下载。"""
+        entry = self.data.get(self.key(path))
+        if not entry or entry.get("url") != url:
+            return False
+        return bool(entry.get("sha256")) and entry["sha256"] == sha256_file(path)
+
+    def record(self, path: Path, url: str, digest: str, size: int) -> None:
+        self.data[self.key(path)] = {
+            "url": url, "sha256": digest, "size": size,
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.dirty = True
+
+    def save(self) -> None:
+        if not (self.path and self.dirty):
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+        except Exception as exc:
+            logger.warning(f"写入图片指纹清单失败（不影响本次结果）：{exc}")
+
+
+def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root_dir: Path) -> None:
+    """原子写入图片：先写 .nfgpart 再 replace，避免媒体服务器读到半截文件。"""
+    if backup_root:
+        try:
+            dst = backup_root / path.relative_to(root_dir)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and not dst.exists():      # 首次备份为准
+                shutil.copy2(path, dst)
+        except Exception as exc:
+            logger.warning(f"备份图片失败（继续写入）：{path}（{exc}）")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".nfgpart")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
+    """从 TMDB 的图片数组里挑一张。
+
+    排序优先级：语言匹配 → 分辨率（越大越好）→ 社区评分 → 投票数。
+    语言上先要本语言、再要无文字版（iso_639_1 为空）、其次英文、最后其他语言。
+    """
+    lang = (language or "").split("-")[0].lower()
+
+    def rank(item: dict) -> Tuple[int, int, float, int]:
+        code = (item.get("iso_639_1") or "").lower()
+        if lang and code == lang:
+            lang_rank = 0
+        elif not code:
+            lang_rank = 1
+        elif code == "en":
+            lang_rank = 2
+        else:
+            lang_rank = 3
+        return (lang_rank,
+                -int(item.get("width") or 0),
+                -float(item.get("vote_average") or 0),
+                -int(item.get("vote_count") or 0))
+
+    candidates = [item for item in entries or [] if item.get("file_path")]
+    return min(candidates, key=rank) if candidates else None
+
+
+def image_size_for(quality: str, kind: str) -> str:
+    return IMG_SIZES.get(quality, IMG_SIZES["standard"]).get(kind, "original")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 在线数据源：统一产出 {字段名: [字符串]} 与 {图片类型: URL}
 # ══════════════════════════════════════════════════════════════════════
 class TmdbProvider:
     """直连 TMDB。行为最可预测，建议优先使用（需要一个免费 API Key）。"""
@@ -384,11 +584,13 @@ class TmdbProvider:
     name = "TMDB 直连"
 
     def __init__(self, api_key: str, language: str = "zh-CN", proxy: Optional[str] = None,
-                 cert_country: str = "US", cast_limit: int = 20):
+                 cert_country: str = "US", cast_limit: int = 20,
+                 image_quality: str = "standard"):
         self.api_key = api_key
         self.language = language
         self.cert_country = (cert_country or "US").upper()
         self.cast_limit = cast_limit
+        self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
         handlers = []
         if proxy:
             handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
@@ -534,15 +736,74 @@ class TmdbProvider:
             "season": to_str_list(data.get("season_number")),
         }
 
+    def search(self, title: str, year: Optional[str] = None, is_tv: bool = False) -> Optional[str]:
+        """按标题（+年份）搜索 TMDB 返回 id。让 NFO 里没有 tmdbid 的存量文件也能被识别。"""
+        if not title:
+            return None
+        params: Dict[str, Any] = {"query": title}
+        if year:
+            params["first_air_date_year" if is_tv else "year"] = year
+        data = self._get("/search/tv" if is_tv else "/search/movie", **params)
+        results = (data or {}).get("results") or []
+        if not results:
+            return None
+        if year:                      # 有年份时优先取年份一致的，避免命中重名新片
+            for item in results:
+                date = item.get("first_air_date") if is_tv else item.get("release_date")
+                if str(date or "").startswith(str(year)) and item.get("id"):
+                    return str(item["id"])
+        first = results[0].get("id")
+        return str(first) if first else None
+
+    # ── 图片 ────────────────────────────────────────────────────────
+    def image_size(self, kind: str) -> str:
+        return image_size_for(self.image_quality, kind)
+
+    def fetch_images(self, tmdb_id: str, media_type: str, season: Optional[str] = None,
+                     episode: Optional[str] = None, kinds: Any = ()) -> Dict[str, str]:
+        """返回 {图片类型: 在线地址}。拿不到的图片类型不会出现在结果里。"""
+        lang = (self.language or "").split("-")[0].lower()
+        include = ",".join([part for part in (lang, "en", "null") if part])
+        if media_type == "movie":
+            path = f"/movie/{tmdb_id}/images"
+        elif media_type == "tvshow":
+            path = f"/tv/{tmdb_id}/images"
+        elif media_type == "season" and season:
+            path = f"/tv/{tmdb_id}/season/{season}/images"
+        elif media_type == "episodedetails" and season and episode:
+            path = f"/tv/{tmdb_id}/season/{season}/episode/{episode}/images"
+        else:
+            return {}
+        data = self._get(path, include_image_language=include)
+        if not data:
+            return {}
+        out: Dict[str, str] = {}
+        for kind in kinds:
+            best = pick_best_image(data.get(IMG_API_KEYS.get(kind, "")) or [], self.language)
+            if best:
+                out[kind] = f"{IMG_HOST}{self.image_size(kind)}{best['file_path']}"
+        return out
+
+    def read_image(self, url: str) -> Optional[bytes]:
+        request = urllib.request.Request(url, headers={"User-Agent": UA})
+        try:
+            with self.opener.open(request, timeout=TIMEOUT) as response:
+                return response.read()
+        except Exception as exc:
+            logger.warning(f"图片下载失败：{url}（{exc}）")
+            return None
+
 
 class HostProvider:
     """借用 MoviePilot 自身的媒体识别链路，无需额外 API Key（尽力而为，失败会明确记日志）。"""
 
     name = "MoviePilot 宿主链路"
 
-    def __init__(self) -> None:
+    def __init__(self, image_quality: str = "standard") -> None:
         self._chain = None
         self._failed = False
+        self._opener_obj = None
+        self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
 
     def _media_chain(self):
         if self._failed:
@@ -633,18 +894,69 @@ class HostProvider:
     def fetch_season(self, tmdb_id: str, season: str) -> Dict[str, List[str]]:
         return {}
 
+    # ── 图片 ────────────────────────────────────────────────────────
+    def fetch_images(self, tmdb_id: str, media_type: str, season: Optional[str] = None,
+                     episode: Optional[str] = None, kinds: Any = ()) -> Dict[str, str]:
+        """宿主链路只能给到海报与背景图（MediaInfo 的 poster_path / backdrop_path）。
+
+        剧集缩略图、季海报、徽标拿不到 —— 那几类需要 TMDB API Key 走直连。
+        """
+        if media_type not in ("movie", "tvshow"):
+            return {}
+        info = self._recognize(tmdb_id, media_type == "tvshow")
+        if info is None:
+            return {}
+        attrs = {"poster": ("poster_path", "poster"), "backdrop": ("backdrop_path", "backdrop")}
+        out: Dict[str, str] = {}
+        for kind in kinds:
+            for attr in attrs.get(kind, ()):
+                value = str(getattr(info, attr, "") or "").strip()
+                if value:
+                    out[kind] = (value if value.startswith("http")
+                                 else IMG_HOST + image_size_for(self.image_quality, kind) + value)
+                    break
+        return out
+
+    def _opener(self):
+        """优先复用宿主配置的代理，否则直连。"""
+        if self._opener_obj is None:
+            handlers = []
+            try:
+                from app.core.config import settings  # type: ignore
+                proxy = (getattr(settings, "PROXY_HOST", "") or "").strip()
+                if proxy:
+                    handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            except Exception:
+                pass
+            self._opener_obj = urllib.request.build_opener(*handlers)
+        return self._opener_obj
+
+    def read_image(self, url: str) -> Optional[bytes]:
+        request = urllib.request.Request(url, headers={"User-Agent": UA})
+        try:
+            with self._opener().open(request, timeout=TIMEOUT) as response:
+                return response.read()
+        except Exception as exc:
+            logger.warning(f"图片下载失败：{url}（{exc}）")
+            return None
+
 
 class FileProvider:
     """从本地 JSON 读取「在线数据」，用于离线演练与回归测试。
 
-    JSON 结构： {"movie:157336": {"plot": ["..."], "actor": ["名字|角色|https://..."]}, ...}
+    元数据 JSON 结构： {"movie:157336": {"plot": ["..."], "actor": ["名字|角色|https://..."]}, ...}
     键规则：movie:<tmdbid> / tv:<tmdbid> / season:<tmdbid>:<季> / episode:<tmdbid>:<季>:<集>
+
+    图片 JSON 结构： {"images:movie:157336": {"poster": "images/poster_a.jpg", ...}, ...}
+    键规则同上前缀 images:；值可以是 http(s) 地址，也可以是相对缓存文件所在目录的本地路径
+    （本地路径让整条图片链路不联网也能测）。
     """
 
     name = "本地 JSON"
 
     def __init__(self, cache_path: str):
-        self.data: Dict[str, Dict[str, List[str]]] = {}
+        self.data: Dict[str, Any] = {}
+        self.base_dir = Path(cache_path).parent if cache_path else Path(".")
         if cache_path:
             try:
                 self.data = json.loads(Path(cache_path).read_text(encoding="utf-8"))
@@ -668,6 +980,44 @@ class FileProvider:
     def fetch_episode(self, tmdb_id: str, season: str, episode: str) -> Dict[str, List[str]]:
         return self._lookup(f"episode:{tmdb_id}:{season}:{episode}")
 
+    # ── 图片 ────────────────────────────────────────────────────────
+    def fetch_images(self, tmdb_id: str, media_type: str, season: Optional[str] = None,
+                     episode: Optional[str] = None, kinds: Any = ()) -> Dict[str, str]:
+        if media_type == "movie":
+            key = f"images:movie:{tmdb_id}"
+        elif media_type == "tvshow":
+            key = f"images:tv:{tmdb_id}"
+        elif media_type == "season":
+            key = f"images:season:{tmdb_id}:{season}"
+        elif media_type == "episodedetails":
+            key = f"images:episode:{tmdb_id}:{season}:{episode}"
+        else:
+            return {}
+        entry = self.data.get(key) or {}
+        return {kind: str(entry[kind]) for kind in kinds
+                if isinstance(entry, dict) and entry.get(kind)}
+
+    def read_image(self, url: str) -> Optional[bytes]:
+        """http(s) 走网络；其余按本地文件路径读（相对路径按缓存 JSON 所在目录解析）。"""
+        text = str(url or "").strip()
+        if text.startswith(("http://", "https://")):
+            request = urllib.request.Request(text, headers={"User-Agent": UA})
+            try:
+                with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                    return response.read()
+            except Exception as exc:
+                logger.warning(f"图片下载失败：{text}（{exc}）")
+                return None
+        raw = text[7:] if text.startswith("file://") else text
+        path = Path(urllib.parse.unquote(raw))
+        if not path.is_absolute():
+            path = self.base_dir / path
+        try:
+            return path.read_bytes()
+        except Exception as exc:
+            logger.warning(f"读取本地图片失败：{path}（{exc}）")
+            return None
+
 
 # ══════════════════════════════════════════════════════════════════════
 # 引擎配置与报告
@@ -685,6 +1035,11 @@ class EngineConfig:
     backup_dir: Optional[Path] = None
     max_files: int = 0
     report_limit: int = 300
+    # ── 图片 ──（引擎默认关闭，由插件/CLI 显式开启，避免意外的网络流量）
+    image_mode: str = IMG_OFF              # off | missing | sync
+    image_kinds: set = field(default_factory=lambda: set(IMAGE_KINDS))
+    image_quality: str = "standard"        # standard | original
+    manifest_path: Optional[Path] = None   # 图片指纹清单，稳态下靠它零下载判定「相同」
 
 
 @dataclass
@@ -715,6 +1070,11 @@ class Report:
     mode: str = "sync"
     provider: str = ""
     calls: int = 0
+    images_scanned: int = 0
+    images_written: int = 0
+    image_bytes: int = 0
+    image_counts: Dict[str, int] = field(default_factory=dict)    # 图片差异判定统计
+    image_applied: Dict[str, int] = field(default_factory=dict)   # 图片实际动作统计
 
     def to_text(self) -> str:
         lines = [
@@ -728,6 +1088,13 @@ class Report:
             lines.append("差异判定：" + "｜".join(f"{k} {v}" for k, v in self.counts.items()))
         if self.applied:
             lines.append("实际动作：" + "｜".join(f"{k} {v}" for k, v in self.applied.items()))
+        if self.images_scanned:
+            lines.append(f"检查图片 {self.images_scanned} 张｜写入 {self.images_written} 张"
+                         f"（{self.image_bytes / 1048576:.1f} MB）")
+        if self.image_counts:
+            lines.append("图片判定：" + "｜".join(f"{k} {v}" for k, v in self.image_counts.items()))
+        if self.image_applied:
+            lines.append("图片动作：" + "｜".join(f"{k} {v}" for k, v in self.image_applied.items()))
         if self.errors:
             lines.append("-" * 62)
             lines.append(f"无法比对/失败 {len(self.errors)} 条（最多列 15 条）：")
@@ -789,6 +1156,7 @@ class Engine:
         self.cancel = cancel or Event()
         self.single_file = single_file
         self.report = Report(mode=cfg.mode, provider=getattr(provider, "name", "?"))
+        self.manifest = ImageManifest(cfg.manifest_path)
 
     # ── 在线数据获取 ────────────────────────────────────────────────
     def fetch_remote(self, nfo: NfoFile) -> Tuple[Dict[str, List[str]], str]:
@@ -881,10 +1249,12 @@ class Engine:
             if index % 200 == 0:
                 logger.info(f"进度 {index}/{len(targets)}")
 
+        self.manifest.save()
         self.report.finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.report.calls = getattr(self.provider, "calls", 0)
         logger.info(f"NFO 差异比对结束：扫描 {self.report.scanned}，写入 {self.report.changed_files}，"
-                    f"无差异 {self.report.untouched}")
+                    f"无差异 {self.report.untouched}；图片检查 {self.report.images_scanned}，"
+                    f"写入 {self.report.images_written}")
         return self.report
 
     def process(self, path: Path, root_dir: Path) -> None:
@@ -943,11 +1313,16 @@ class Engine:
             if do_write:
                 plan.append((name, action == REPLACE))
 
-        if not plan:
+        pending_images = self.process_images(nfo, rel, root_dir)
+
+        if not plan and not pending_images:
             self.report.untouched += 1
             return
         if self.cfg.dry_run:
-            logger.info(f"[预演] {rel} 将更新 {len(plan)} 个字段：{', '.join(p[0] for p in plan)}")
+            if plan:
+                logger.info(f"[预演] {rel} 将更新 {len(plan)} 个字段：{', '.join(p[0] for p in plan)}")
+            return
+        if not plan:
             return
 
         for name, replace in plan:
@@ -955,6 +1330,118 @@ class Engine:
         write_nfo_file(nfo, (self.cfg.backup_dir if self.cfg.backup else None), root_dir)
         self.report.changed_files += 1
         logger.info(f"已更新 {rel}：{', '.join(p[0] for p in plan)}")
+
+    # ── 图片 ────────────────────────────────────────────────────────
+    def fetch_remote_images(self, nfo: NfoFile, kinds: set) -> Dict[str, str]:
+        if not kinds or not hasattr(self.provider, "fetch_images"):
+            return {}
+        root = nfo.root
+        mtype = nfo.media_type
+        tmdb_id, _ = find_tmdb_id(root, mtype)
+        if mtype in ("tvshow", "season", "episodedetails") and not tmdb_id:
+            tmdb_id, _ = self._find_show_id(nfo)
+        if mtype == "movie" and not tmdb_id:
+            tmdb_id, _ = self._search_id(nfo, is_tv=False)
+        if not tmdb_id:
+            return {}
+        season = episode = None
+        if mtype in ("season", "episodedetails"):
+            season = norm_text(root.findtext("season")) or self._from_name(nfo, r"S(\d+)")
+        if mtype == "episodedetails":
+            episode = norm_text(root.findtext("episode")) or self._from_name(nfo, r"E(\d+)")
+        try:
+            return self.provider.fetch_images(tmdb_id, mtype, season=season,
+                                              episode=episode, kinds=kinds) or {}
+        except Exception as exc:
+            logger.warning(f"获取在线图片列表失败：{nfo.path}（{exc}）")
+            return {}
+
+    def process_images(self, nfo: NfoFile, rel: str, root_dir: Path) -> int:
+        """比对/补齐该 NFO 对应的图片，返回「需要写盘」的目标数（演练模式下也算）。"""
+        if self.cfg.image_mode == IMG_OFF:
+            return 0
+        targets = image_targets(nfo, self.cfg.image_kinds)
+        if not targets:
+            return 0
+        urls = self.fetch_remote_images(nfo, {spec.kind for spec, _ in targets})
+        if not urls:
+            return 0
+
+        actionable = 0
+        locked = get_locked_fields(nfo.root) if self.cfg.respect_lock else None
+        locked_names = {f.casefold() for f in locked} if isinstance(locked, set) else set()
+        cache: Dict[str, Optional[bytes]] = {}     # 同一 URL 本轮只下载一次（别名文件共用）
+        for spec, path in targets:
+            url = urls.get(spec.kind)
+            if not url:
+                continue
+            self.report.images_scanned += 1
+            label = f"[图片] {spec.kind} → {path.name}" + ("（别名）" if spec.alias else "")
+
+            # Kodi 的 lockdata 表示「整个条目不许改」，lockedfields 可按字段名锁单张图
+            if locked is True or spec.kind.casefold() in locked_names:
+                self.report.skipped_locked += 1
+                self.__image_change(rel, "未比对", "跳过（NFO 锁定）", label,
+                                    "lockdata / lockedfields", url)
+                continue
+
+            # 指纹清单能证明「本地就是这张在线图」→ 零下载跳过（稳态下几乎不产生流量）
+            if self.manifest.matches(path, url):
+                self.__image_change(rel, SAME, SKIP, label, "与在线一致（指纹匹配）", url)
+                continue
+
+            exists = path.exists()
+            local_digest = sha256_file(path) if exists else None
+
+            if self.cfg.image_mode == IMG_MISSING and exists:
+                self.__image_change(rel, "未比对", "跳过（仅补缺失）", label,
+                                    f"已存在 {path.stat().st_size} 字节", url)
+                continue
+
+            if url not in cache:
+                reader = getattr(self.provider, "read_image", None)
+                cache[url] = reader(url) if callable(reader) else None
+            data = cache[url]
+            if not data:
+                self.report.errors.append(f"{rel}：图片下载失败（{spec.kind}）{url}")
+                continue
+
+            digest = hashlib.sha256(data).hexdigest()
+            if local_digest == digest:
+                self.manifest.record(path, url, digest, len(data))
+                self.__image_change(rel, SAME, SKIP, label, "与在线一致", url)
+                continue
+
+            verdict = REMOTE_ONLY if not exists else DIFF
+            action = FILL if not exists else REPLACE
+            local_desc = "（缺失）" if not exists else f"{path.stat().st_size} 字节，与在线不同"
+            actionable += 1
+
+            if self.cfg.mode == "report":
+                self.__image_change(rel, verdict, f"{action}（仅报告）", label, local_desc, url)
+            elif self.cfg.mode == "gapfill" and action == REPLACE:
+                self.__image_change(rel, verdict, "跳过（gapfill 只补缺失）", label, local_desc, url)
+            elif self.cfg.dry_run:
+                self.__image_change(rel, verdict, f"{action}（演练）", label, local_desc, url)
+            else:
+                write_image_bytes(path, data,
+                                  self.cfg.backup_dir if self.cfg.backup else None, root_dir)
+                self.manifest.record(path, url, digest, len(data))
+                self.report.images_written += 1
+                self.report.image_bytes += len(data)
+                self.__image_change(rel, verdict, action, label, local_desc, url)
+                logger.info(f"图片{action}：{path}")
+        return actionable
+
+    def __image_change(self, rel: str, verdict: str, action: str, field: str,
+                       local: str, remote: str) -> None:
+        self.report.image_counts[verdict] = self.report.image_counts.get(verdict, 0) + 1
+        self.report.image_applied[action] = self.report.image_applied.get(action, 0) + 1
+        if len(self.report.changes) >= self.cfg.report_limit:
+            return
+        self.report.changes.append(Change(
+            nfo=rel, media_type="图片", field=field, verdict=verdict, action=action,
+            local=local[:200], remote=remote[:200]))
 
     def record(self, rel: str, media_type: str, name: str, verdict: str,
                action: str, local_vals: List[str], remote_vals: List[str]) -> None:
@@ -971,9 +1458,10 @@ class Engine:
 # ══════════════════════════════════════════════════════════════════════
 class NfoGapFill(_PluginBase):  # type: ignore[misc]
     # 插件名称
-    plugin_name = "NFO 差异比对与补齐"
+    plugin_name = "NFO 与图片差异比对"
     # 插件描述
-    plugin_desc = "比对本地 NFO 与在线元数据：缺失补齐、不一致替换、一致跳过；支持字段保护与 NFO 锁定。"
+    plugin_desc = ("比对本地 NFO 与海报/背景图：缺失补齐、不一致替换、一致跳过；"
+                   "支持字段保护与 NFO 锁定。")
     # 插件图标
     plugin_icon = "NfoGapFill.png"
     # 插件版本
@@ -1008,6 +1496,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _cast_limit: str = "20"
     _max_files: str = "0"
     _notify: bool = True
+    _image_mode: str = IMG_SYNC
+    _image_kinds: str = "poster,backdrop,logo,thumb"
+    _image_quality: str = "standard"
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
 
@@ -1032,6 +1523,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._cast_limit = str(config.get("cast_limit") or "20")
             self._max_files = str(config.get("max_files") or "0")
             self._notify = bool(config.get("notify", True))
+            self._image_mode = config.get("image_mode") or IMG_SYNC
+            self._image_kinds = config.get("image_kinds") or "poster,backdrop,logo,thumb"
+            self._image_quality = config.get("image_quality") or "standard"
 
         self.stop_service()
 
@@ -1107,11 +1601,53 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "component": "VRow",
                         "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSwitch", "props": {"model": "backup", "label": "写入前备份原 NFO"}}]},
+                                {"component": "VSwitch", "props": {"model": "backup", "label": "写入前备份原 NFO / 图片"}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VTextField", "props": {
                                     "model": "max_files", "label": "单轮最多处理文件数",
                                     "placeholder": "0 表示不限；首次全库建议填 50 试水"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "image_mode",
+                                    "label": "图片处理",
+                                    "items": [
+                                        {"title": "缺失补齐 + 不一致替换（推荐）", "value": "sync"},
+                                        {"title": "只补缺失图片（不比对、不替换已有图）", "value": "missing"},
+                                        {"title": "完全不处理图片", "value": "off"},
+                                    ]}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "image_quality",
+                                    "label": "图片画质",
+                                    "items": [
+                                        {"title": "标准（海报 w780 / 背景 w1280，省空间）", "value": "standard"},
+                                        {"title": "原始尺寸（最清晰，体积明显更大）", "value": "original"},
+                                    ]}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {
+                                    "model": "image_kinds", "label": "处理的图片类型",
+                                    "placeholder": "逗号分隔：poster,backdrop,logo,thumb（thumb = 剧集缩略图）"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "图片沿用同一套「一致才跳过」逻辑：先比对本地图与在线图，一致不动、"
+                                         "不一致才替换 —— 官方「媒体库刮削」只判断文件在不在，"
+                                         "所以低清图、错图永远不会被换掉。首次运行需要下载比对以建立指纹，"
+                                         "之后靠指纹零下载判定。剧集缩略图要求该集存在 NFO。"}]},
                         ],
                     },
                     {
@@ -1219,6 +1755,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "proxy": "",
             "cert_country": "US",
             "cast_limit": "20",
+            "image_mode": IMG_SYNC,
+            "image_kinds": "poster,backdrop,logo,thumb",
+            "image_quality": "standard",
         }
 
     def get_page(self) -> List[dict]:
@@ -1231,7 +1770,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     {"component": "VCol", "props": {"cols": 12}, "content": [
                         {"component": "VAlert", "props": {
                             "type": "info", "variant": "tonal",
-                            "text": f"NFO 差异比对与补齐 v{PLUGIN_VERSION}　模式：{self._mode}"
+                            "text": f"NFO 与图片差异比对 v{PLUGIN_VERSION}　模式：{self._mode}"
+                                    f"　图片：{self._image_mode}"
                                     + ("　（演练中，不会写盘）" if self._dry_run else "")}}]},
                 ],
             },
@@ -1303,6 +1843,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "proxy": self._proxy,
                 "cert_country": self._cert_country,
                 "cast_limit": self._cast_limit,
+                "image_mode": self._image_mode,
+                "image_kinds": self._image_kinds,
+                "image_quality": self._image_quality,
             })
         except Exception as exc:
             logger.warning(f"保存插件配置失败：{exc}")
@@ -1322,12 +1865,22 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
         except Exception:
             return ""
 
+    def __manifest_file(self) -> Path:
+        try:
+            base = Path(self.get_data_path())
+        except Exception:
+            base = Path(__file__).parent
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "image_manifest.json"
+
     def __build_provider(self):
+        quality = self._image_quality if self._image_quality in IMG_SIZES else "standard"
         if self._tmdb_api_key:
             return TmdbProvider(self._tmdb_api_key, self._language, self._proxy or None,
-                                self._cert_country, self.__int(self._cast_limit, 20))
-        logger.info("未配置 TMDB API Key，尝试使用 MoviePilot 宿主链路")
-        return HostProvider()
+                                self._cert_country, self.__int(self._cast_limit, 20), quality)
+        logger.info("未配置 TMDB API Key，尝试使用 MoviePilot 宿主链路"
+                    "（该通道只能取到海报与背景图，剧集缩略图 / 季海报 / 徽标需填写 API Key）")
+        return HostProvider(quality)
 
     @staticmethod
     def __int(value: Any, default: int) -> int:
@@ -1343,6 +1896,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     @staticmethod
     def __split_set(text: str) -> set:
         return {item.strip().casefold() for item in re.split(r"[,\s]+", text or "") if item.strip()}
+
+    def __image_kinds_set(self) -> set:
+        """解析「处理的图片类型」。留空或全填错时回退为全部类型，避免静默什么都不做。"""
+        picked = {item.strip().casefold() for item in re.split(r"[,\s]+", self._image_kinds or "")
+                  if item.strip()}
+        return (picked & set(IMAGE_KINDS)) or set(IMAGE_KINDS)
 
     def __run(self) -> None:
         try:
@@ -1360,6 +1919,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 dry_run=self._dry_run,
                 backup=self._backup,
                 max_files=self.__int(self._max_files, 0),
+                image_mode=(self._image_mode if self._image_mode in (IMG_OFF, IMG_MISSING, IMG_SYNC)
+                            else IMG_SYNC),
+                image_kinds=self.__image_kinds_set(),
+                image_quality=(self._image_quality if self._image_quality in IMG_SIZES
+                               else "standard"),
+                manifest_path=self.__manifest_file(),
             )
             provider = self.__build_provider()
             self._event.clear()
@@ -1375,6 +1940,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     "scanned": report.scanned, "changed": report.changed_files,
                     "untouched": report.untouched, "unresolved": report.unresolved,
                     "finished": report.finished, "mode": report.mode,
+                    "images_scanned": report.images_scanned,
+                    "images_written": report.images_written,
+                    "image_bytes": report.image_bytes,
                 })
             except Exception:
                 pass
@@ -1385,10 +1953,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             logger.error(f"NFO 差异比对任务异常：{exc}")
 
     def __notify(self, report: Report) -> None:
-        title = "【NFO 差异比对】完成"
-        text = (f"扫描 {report.scanned}｜写入 {report.changed_files}｜无差异 {report.untouched}\n"
-                f"替换 {report.counts.get(REPLACE, 0)}｜补齐 {report.counts.get(FILL, 0)}"
-                f"｜取不到在线数据 {report.unresolved}"
+        title = "【NFO 与图片差异比对】完成"
+        text = (f"扫描 NFO {report.scanned}｜写入 {report.changed_files}｜无差异 {report.untouched}\n"
+                f"字段：替换 {report.counts.get(REPLACE, 0)}｜补齐 {report.counts.get(FILL, 0)}"
+                f"｜取不到在线数据 {report.unresolved}\n"
+                f"图片：检查 {report.images_scanned}｜写入 {report.images_written}"
+                f"（{report.image_bytes / 1048576:.1f} MB）"
                 f"{'（演练，未写盘）' if self._dry_run else ''}")
         try:
             from app.schemas.types import NotificationType  # type: ignore
@@ -1409,21 +1979,24 @@ def build_cli_provider(args) -> Any:
             raise SystemExit("--source file 需要同时指定 --cache <json 路径>")
         return FileProvider(args.cache)
     if args.source == "host":
-        return HostProvider()
+        return HostProvider(args.image_quality)
     if not args.api_key:
         raise SystemExit("--source tmdb 需要 --api-key，或设置环境变量 TMDB_API_KEY")
-    return TmdbProvider(args.api_key, args.lang, args.proxy or None, args.cert_country, args.cast_limit)
+    return TmdbProvider(args.api_key, args.lang, args.proxy or None, args.cert_country,
+                        args.cast_limit, args.image_quality)
 
 
 def cli_main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="NfoGapFill",
-        description="NFO 元数据差异比对与补齐：缺失补齐、不一致替换、一致跳过",
+        description="NFO 与图片元数据差异比对：缺失补齐、不一致替换、一致跳过",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例：\n"
                "  体检（只报告差异）  python NfoGapFill.py --root /media/link --source tmdb --api-key XXX --mode report\n"
                "  离线演练            python NfoGapFill.py --root /media/link --source file --cache remote.json\n"
-               "  正式执行            python NfoGapFill.py --root /media/link --source tmdb --api-key XXX --mode sync --fix")
+               "  正式执行            python NfoGapFill.py --root /media/link --source tmdb --api-key XXX --mode sync --fix\n"
+               "  含图片              ... --fix --image-mode sync\n"
+               "\n注意：插件里图片处理默认开启（sync），CLI 里默认关闭（off），需显式指定。")
     parser.add_argument("--root", action="append", required=True, help="媒体库目录，可重复指定")
     parser.add_argument("--source", choices=["tmdb", "host", "file"], default="tmdb",
                         help="在线数据来源：tmdb 直连 / host 宿主链路 / file 本地 JSON")
@@ -1443,6 +2016,14 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-files", type=int, default=0, help="单轮最多处理多少个 NFO")
     parser.add_argument("--no-backup", action="store_true", help="不备份原文件（不推荐）")
     parser.add_argument("--backup-dir", default="", help="备份目录，默认 <root>/.nfo-backup")
+    parser.add_argument("--image-mode", choices=["off", "missing", "sync"], default="off",
+                        help="图片处理：off 不处理（CLI 默认）/ missing 只补缺失 / sync 不一致则替换")
+    parser.add_argument("--image-kinds", default="poster,backdrop,logo,thumb",
+                        help="处理的图片类型，逗号分隔（默认四种全开）")
+    parser.add_argument("--image-quality", choices=["standard", "original"], default="standard",
+                        help="图片画质，默认 standard（海报 w780 / 背景图 w1280 / 徽标 w500）")
+    parser.add_argument("--image-manifest", default="",
+                        help="图片指纹清单路径，默认 <第一个媒体库目录>/.nfo-backup/image_manifest.json")
     parser.add_argument("--json", dest="json_out", default="", help="把完整报告写入 JSON")
     args = parser.parse_args(argv)
 
@@ -1456,6 +2037,9 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
         args.mode = "report"
 
     provider = build_cli_provider(args)
+    image_kinds = {s.strip().casefold() for s in re.split(r"[,\s]+", args.image_kinds) if s.strip()}
+    manifest_path = (Path(args.image_manifest).expanduser() if args.image_manifest
+                     else roots[0] / ".nfo-backup" / "image_manifest.json")
     cfg = EngineConfig(
         roots=roots,
         exclude_paths=[s.strip() for s in re.split(r"[,\n]+", args.exclude) if s.strip()],
@@ -1466,6 +2050,10 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
         backup=not args.no_backup,
         backup_dir=Path(args.backup_dir).expanduser() if args.backup_dir else roots[0] / ".nfo-backup",
         max_files=args.max_files,
+        image_mode=args.image_mode,
+        image_kinds=(image_kinds & set(IMAGE_KINDS)) or set(IMAGE_KINDS),
+        image_quality=args.image_quality,
+        manifest_path=manifest_path,
     )
     report = Engine(cfg, provider).run()
     print()
@@ -1476,6 +2064,11 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
             "changed_files": report.changed_files, "skipped_locked": report.skipped_locked,
             "unresolved": report.unresolved, "failed": report.failed,
             "counts": report.counts, "errors": report.errors,
+            "images_scanned": report.images_scanned,
+            "images_written": report.images_written,
+            "image_bytes": report.image_bytes,
+            "image_counts": report.image_counts,
+            "image_applied": report.image_applied,
             "changes": [c.__dict__ for c in report.changes],
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n报告已写入：{args.json_out}")

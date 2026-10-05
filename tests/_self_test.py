@@ -21,7 +21,19 @@ MOVIE_A = FIX / "电影" / "星际穿越 (2014)" / "movie.nfo"
 MOVIE_B = FIX / "电影" / "沙丘 (2021)" / "沙丘 (2021).nfo"
 MOVIE_LOCKED = FIX / "电影" / "锁定测试 (2000)" / "movie.nfo"
 TVSHOW = FIX / "电视剧" / "怪奇物语 (2016)" / "tvshow.nfo"
+SEASON = FIX / "电视剧" / "怪奇物语 (2016)" / "Season 01" / "season.nfo"
 EPISODE = FIX / "电视剧" / "怪奇物语 (2016)" / "Season 01" / "怪奇物语 - S01E01.nfo"
+IMAGES = HERE / "_fixture" / "images"
+
+# 图片落盘位置（与 MP / Kodi / Jellyfin 约定一致）
+POSTER = FIX / "电影" / "星际穿越 (2014)" / "poster.jpg"
+BACKDROP = FIX / "电影" / "星际穿越 (2014)" / "backdrop.jpg"
+FANART = FIX / "电影" / "星际穿越 (2014)" / "fanart.jpg"
+LOGO = FIX / "电影" / "星际穿越 (2014)" / "logo.png"
+TV_POSTER = FIX / "电视剧" / "怪奇物语 (2016)" / "poster.jpg"
+SEASON_POSTER = FIX / "电视剧" / "怪奇物语 (2016)" / "Season 01" / "poster.jpg"
+SEASON_ROOT_POSTER = FIX / "电视剧" / "怪奇物语 (2016)" / "season01-poster.jpg"
+EPISODE_THUMB = FIX / "电视剧" / "怪奇物语 (2016)" / "Season 01" / "怪奇物语 - S01E01.jpg"
 
 FIXTURES = {
     MOVIE_A: """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -66,6 +78,12 @@ FIXTURES = {
   <episode>1</episode>
 </episodedetails>
 """,
+    SEASON: """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<season>
+  <title></title>
+  <season>1</season>
+</season>
+""",
 }
 
 results = []
@@ -80,6 +98,11 @@ def reset_fixture():
     for path, text in FIXTURES.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+    # 清掉上一轮写进样例库的图片，保证每轮起点一致（下面各轮会按需重新放置预置图）
+    for pattern in ("*.jpg", "*.png", "*.nfgpart"):
+        for stray in FIX.rglob(pattern):
+            if stray.is_file():
+                stray.unlink()
     shutil.rmtree(FIX / ".nfo-backup", ignore_errors=True)
 
 
@@ -176,6 +199,79 @@ text_b = MOVIE_B.read_text(encoding="utf-8")
 check("gapfill 补缺失（星际穿越 plot）", "一支探险队利用虫洞穿越星际" in text_a)
 check("gapfill 不替换不一致（genre 仍为 1 项）", text_a.count("<genre>") == 1)
 check("gapfill 不替换不一致（沙丘 year 仍为 2022）", "<year>2022</year>" in text_b)
+
+print()
+print("=" * 70)
+print("第 6 轮：图片补全 —— 缺失补齐、别名、各类型落盘位置")
+print("=" * 70)
+reset_fixture()
+out = run("--mode", "sync", "--fix", "--image-mode", "sync")
+check("缺失海报被补齐（内容与在线图一致）",
+      POSTER.exists() and POSTER.read_bytes() == (IMAGES / "poster_a.png").read_bytes())
+check("缺失背景图被补齐", BACKDROP.exists() and BACKDROP.read_bytes() == (IMAGES / "backdrop_a.png").read_bytes())
+check("fanart 别名与 backdrop 内容一致", FANART.exists() and FANART.read_bytes() == BACKDROP.read_bytes())
+check("缺失徽标被补齐", LOGO.exists() and LOGO.read_bytes() == (IMAGES / "logo_a.png").read_bytes())
+check("剧集海报被补齐", TV_POSTER.exists() and TV_POSTER.read_bytes() == (IMAGES / "poster_a.png").read_bytes())
+check("季海报写入季目录", SEASON_POSTER.exists() and SEASON_POSTER.read_bytes() == (IMAGES / "season1.png").read_bytes())
+check("季海报同时写剧集根目录 season01-poster.jpg", SEASON_ROOT_POSTER.exists())
+check("单集缩略图按 <视频名>.jpg 落盘",
+      EPISODE_THUMB.exists() and EPISODE_THUMB.read_bytes() == (IMAGES / "still_a.png").read_bytes())
+check("lockdata 条目连图片一起跳过", not (FIX / "电影" / "锁定测试 (2000)" / "poster.jpg").exists())
+check("报告包含图片统计", "检查图片" in out)
+check("报告包含图片判定与动作", "图片判定" in out and "图片动作" in out)
+
+print()
+print("=" * 70)
+print("第 7 轮：图片幂等 —— 指纹清单让第二次运行零下载、零写入")
+print("=" * 70)
+before = {p: p.read_bytes() for p in (POSTER, BACKDROP, FANART, LOGO, TV_POSTER, EPISODE_THUMB)}
+out = run("--mode", "sync", "--fix", "--image-mode", "sync")
+check("第二次运行图片零写入", "写入 0 张" in out, out.strip().splitlines()[-1] if out else "")
+check("第二次运行靠指纹判定一致（未重新下载比对）", "指纹匹配" in out)
+check("第二次运行所有图片字节级不变",
+      all(p.read_bytes() == before[p] for p in before))
+
+print()
+print("=" * 70)
+print("第 8 轮：图片不一致则替换（并备份原图）")
+print("=" * 70)
+wrong = (IMAGES / "poster_wrong.png").read_bytes()
+POSTER.write_bytes(wrong)
+out = run("--mode", "sync", "--fix", "--image-mode", "sync")
+check("放错的本地海报被替换回在线图", POSTER.read_bytes() == (IMAGES / "poster_a.png").read_bytes())
+check("替换写入被记入报告", "图片动作" in out and "替换" in out)
+check("被替换的原图已备份",
+      (FIX / ".nfo-backup" / "电影" / "星际穿越 (2014)" / "poster.jpg").read_bytes() == wrong)
+
+print()
+print("=" * 70)
+print("第 9 轮：image-mode=missing —— 只补缺失，不动已有图")
+print("=" * 70)
+reset_fixture()
+POSTER.parent.mkdir(parents=True, exist_ok=True)
+POSTER.write_bytes(wrong)          # 预置一张「错的」海报
+out = run("--mode", "sync", "--fix", "--image-mode", "missing")
+check("已存在的错图不被替换", POSTER.read_bytes() == wrong)
+check("缺失的图仍然被补齐", BACKDROP.exists())
+check("报告标注了「仅补缺失」", "仅补缺失" in out)
+
+print()
+print("=" * 70)
+print("第 10 轮：演练模式下不写图片")
+print("=" * 70)
+reset_fixture()
+out = run("--mode", "sync", "--dry-run", "--fix", "--image-mode", "sync")
+check("演练模式不落任何图片", not POSTER.exists() and not BACKDROP.exists() and not LOGO.exists())
+check("演练模式仍报告将要执行的图片动作", "演练" in out and "检查图片" in out)
+
+print()
+print("=" * 70)
+print("第 11 轮：image-mode=off 完全不碰图片")
+print("=" * 70)
+reset_fixture()
+out = run("--mode", "sync", "--fix", "--image-mode", "off")
+check("关闭图片时不写图片", not POSTER.exists() and not BACKDROP.exists())
+check("关闭图片时报告里没有图片统计", "检查图片" not in out)
 
 print()
 print("=" * 70)

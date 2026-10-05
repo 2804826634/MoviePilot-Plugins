@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -119,7 +120,8 @@ check("get_form 返回 (页面JSON, 默认配置) 二元组",
 defaults = form[1]
 expected_keys = {"enabled", "onlyonce", "notify", "mode", "cron", "dry_run", "respect_lock",
                  "backup", "max_files", "paths", "exclude_paths", "protect_fields",
-                 "only_fields", "tmdb_api_key", "language", "proxy", "cert_country", "cast_limit"}
+                 "only_fields", "tmdb_api_key", "language", "proxy", "cert_country", "cast_limit",
+                 "image_mode", "image_kinds", "image_quality"}
 check("默认配置包含全部配置项", expected_keys <= set(defaults),
       f"缺少 {expected_keys - set(defaults)}")
 form_json = str(form[0])
@@ -172,8 +174,94 @@ import app.plugins as mock_host   # noqa: E402
 check("已发送通知", len(mock_host.MESSAGES) == 1,
       f"收到 {len(mock_host.MESSAGES)} 条")
 check("通知标题符合预期",
-      mock_host.MESSAGES and "NFO 差异比对" in mock_host.MESSAGES[0].get("title", ""))
+      mock_host.MESSAGES and "NFO 与图片差异比对" in mock_host.MESSAGES[0].get("title", ""))
 check("save_data 被调用", "nfogapfill_report" in mock_host.DATA)
+
+print()
+print("=" * 70)
+print("图片能力：单元 + 端到端")
+print("=" * 70)
+check("端到端报告包含图片统计", "检查图片" in text)
+check("端到端报告包含图片判定与动作", "图片判定" in text and "图片动作" in text)
+check("演练模式下没有把图片写进样例库",
+      not (FIX / "电影" / "星际穿越 (2014)" / "poster.jpg").exists())
+check("save_data 记录了图片统计",
+      (mock_host.DATA.get("nfogapfill_report") or {}).get("images_scanned", 0) > 0)
+check("报告文件指明模式与数据源", "数据源" in text)
+
+# pick_best_image：语言优先 → 分辨率 → 评分
+candidates = [
+    {"file_path": "/en_hi.jpg", "iso_639_1": "en", "width": 2000, "height": 3000,
+     "vote_average": 9.0, "vote_count": 50},
+    {"file_path": "/zh_small.jpg", "iso_639_1": "zh", "width": 1200, "height": 1800,
+     "vote_average": 5.0, "vote_count": 3},
+    {"file_path": "/textless.jpg", "iso_639_1": None, "width": 1800, "height": 2700,
+     "vote_average": 6.0, "vote_count": 10},
+]
+best = module.pick_best_image(candidates, "zh-CN")
+check("同语言优先（选到 zh 那张，而不是票数最高的 en）",
+      best is not None and best["file_path"] == "/zh_small.jpg")
+best_other = module.pick_best_image([c for c in candidates if c["iso_639_1"] != "zh"], "ja-JP")
+check("无本语言时：无文字版优先于英文版",
+      best_other is not None and best_other["file_path"] == "/textless.jpg")
+best_res = module.pick_best_image(
+    [{"file_path": "/small.jpg", "iso_639_1": None, "width": 500,
+      "vote_average": 9.0, "vote_count": 99},
+     {"file_path": "/big.jpg", "iso_639_1": None, "width": 2000,
+      "vote_average": 5.0, "vote_count": 1}], "zh")
+check("同语言档位内按分辨率优先（本地图库要清晰度）",
+      best_res is not None and best_res["file_path"] == "/big.jpg")
+check("候选为空时返回 None", module.pick_best_image([], "zh") is None)
+check("没有 file_path 的候选被忽略",
+      module.pick_best_image([{"iso_639_1": "zh", "width": 9999}], "zh") is None)
+
+# 尺寸档位必须按图片类型区分：TMDB 的 logo 最大只到 w500
+check("standard 档各类型尺寸分别取对",
+      module.image_size_for("standard", "poster") == "w780"
+      and module.image_size_for("standard", "backdrop") == "w1280"
+      and module.image_size_for("standard", "logo") == "w500"
+      and module.image_size_for("standard", "thumb") == "w300")
+check("original 档一律返回 original", module.image_size_for("original", "logo") == "original")
+check("未知画质档回退 standard", module.image_size_for("bogus", "poster") == "w780")
+
+# image_targets：文件名与目录落点
+movie_nfo = module.load_nfo(FIX / "电影" / "星际穿越 (2014)" / "movie.nfo")
+movie_targets = {(spec.kind, spec.name) for spec, _ in
+                 module.image_targets(movie_nfo, set(module.IMAGE_KINDS))}
+check("电影图片目标 = poster / backdrop / fanart / logo",
+      movie_targets == {("poster", "poster.jpg"), ("backdrop", "backdrop.jpg"),
+                        ("backdrop", "fanart.jpg"), ("logo", "logo.png")})
+season_tree = ET.ElementTree(ET.fromstring("<season><season>1</season></season>"))
+season_nfo = module.NfoFile(path=Path("电视剧") / "怪奇物语 (2016)" / "Season 01" / "season.nfo",
+                            media_type="season", tree=season_tree)
+season_targets = module.image_targets(season_nfo, {"poster"})
+check("季海报同时落季目录 poster.jpg 与剧集根目录 season01-poster.jpg",
+      len(season_targets) == 2
+      and season_targets[0][1].name == "poster.jpg"
+      and season_targets[0][1].parent.name == "Season 01"
+      and season_targets[1][1].name == "season01-poster.jpg"
+      and season_targets[1][1].parent.name == "怪奇物语 (2016)")
+check("按 kinds 过滤生效（只要 poster 时不产出 backdrop）",
+      all(spec.kind == "poster" for spec, _ in season_targets))
+episode_tree = ET.ElementTree(ET.fromstring("<episodedetails><season>2</season></episodedetails>"))
+episode_nfo = module.NfoFile(path=Path("剧") / "Season 02" / "剧 - S02E03.nfo",
+                             media_type="episodedetails", tree=episode_tree)
+episode_targets = module.image_targets(episode_nfo, {"thumb"})
+check("单集缩略图 = 视频同名 .jpg（与 MP 的写法一致）",
+      len(episode_targets) == 1 and episode_targets[0][1].name == "剧 - S02E03.jpg")
+
+# 指纹清单：内容与 URL 都一致才算「相同」
+manifest_probe = module.ImageManifest(None)
+probe = DATA_PATH / "probe.jpg"
+probe.write_bytes(b"hello-image")
+digest = module.sha256_file(probe)
+manifest_probe.record(probe, "https://example.com/a.jpg", digest or "", 11)
+check("指纹匹配：URL 与内容都一致 → 判定相同", manifest_probe.matches(probe, "https://example.com/a.jpg"))
+check("URL 变了 → 不算相同（图片源更新了）",
+      not manifest_probe.matches(probe, "https://example.com/b.jpg"))
+probe.write_bytes(b"changed-image")
+check("内容变了 → 不算相同（本地图被换过）",
+      not manifest_probe.matches(probe, "https://example.com/a.jpg"))
 
 print()
 print("=" * 70)

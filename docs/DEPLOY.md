@@ -78,12 +78,17 @@ docker restart moviepilot-v2
 
 ## 五、首次运行建议流程
 
-1. 安装后在插件配置里只填 **媒体库目录**，`mode` 选 **只报告差异**，打开 **演练模式**，保存并「保存后立即运行一次」。
+1. 安装后在插件配置里只填 **媒体库目录**，`mode` 选 **只报告差异**，打开 **演练模式**，
+   图片先设 `image_mode = 只补缺失图片`，保存并「保存后立即运行一次」。
 2. 打开插件详情页看报告，确认：
    - 扫描到的 NFO 数量对得上；
-   - 「不一致」清单里确实是**你认为该改**的字段（如果里面有你的手工润色，把它加进「保护字段」）。
+   - 「不一致」清单里确实是**你认为该改**的字段（如果里面有你的手工润色，把它加进「保护字段」）；
+   - 图片那一节（`检查图片 N 张 / 图片判定 / 图片动作`）里，缺失与不一致的数量符合直觉。
 3. 切 `mode = 不一致则替换`，关掉演练模式，先设 `max_files = 50` 跑一轮。
-4. 确认无误后把 `max_files` 设为 `0`（不限），设置 `cron` 周期任务。
+   图片此时建议仍保持 `missing`，先把 NFO 校准好。
+4. NFO 稳定后把 `image_mode` 切到 **缺失补齐 + 不一致替换**，跑一轮建立图片指纹
+   （这一轮会下载比对，有流量开销，可继续用 `max_files` 控制规模）。
+5. 确认无误后把 `max_files` 设为 `0`（不限），设置 `cron` 周期任务。之后每轮图片几乎是零流量。
 
 ---
 
@@ -100,6 +105,29 @@ docker restart moviepilot-v2
 | 点了运行但没变化 | `mode` 是否为 `report`？`dry_run` 是否开着？字段是否命中 `protect_fields` 或 NFO 内 `lockedfields`？ |
 | 报错 `429 Too Many Requests` | TMDB 限速，调小批次并错峰运行；内置限速为 4 req/s |
 | 中文标点被改成半角 | 属于历史 bug，已在 v1.0.0 修复：比对走 NFKC 归一化，写入始终用原值 |
+
+### 图片相关的现象
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 图片一副都没动 | 依次确认：`image_mode` 不是 `off`；`mode` 不是 `report`；`dry_run` 没开；该条目没有 `<lockdata>true</lockdata>`；`image_kinds` 包含该类型 |
+| 低清 / 放错的图没被换掉 | `image_mode` 若是 `missing` 就只补空缺，改 `sync` 才会比对替换；或该图已被 `lockdata` / `lockedfields` 锁住 |
+| 首轮图片跑得很慢、流量很大 | **预期行为**：库里已有图必须先下载才能判定是否一致。用 `max_files` 分批，或先 `image_mode=missing` 只补空缺 |
+| 剧集缩略图（单集图）没生成 | 该集必须有 NFO —— 本插件以 NFO 为扫描入口；另外它需要 TMDB API Key（宿主通道不提供剧照） |
+| 徽标 logo 没生成 | 同上，TMDB 的 logo 要直连 API；且 `image_kinds` 要含 `logo` |
+| 改了画质档后图片被整批重下 | **预期行为**：画质档位改变请求 URL，指纹随之失效。要么接受一次重下，要么先删掉 `image_manifest.json` 重新建立 |
+| 季海报只出现在一个地方 | 两处都会写：`<季目录>/poster.jpg` 与 `<剧集根目录>/seasonNN-poster.jpg`。若剧集根目录不可写会静默失败，看日志里的「备份图片失败 / 图片补齐失败」 |
+| 想知道某张图来自哪个 URL | 打开 `image_manifest.json`（插件数据目录内，或 CLI 的 `<root>/.nfo-backup/image_manifest.json`），按路径查 |
+
+> 图片写入采用「先写 `.nfgpart` 再原子替换」，所以不会出现媒体服务器读到半截图片的情况。
+> 如果目录里看到 `.nfgpart` 残留，说明上次写入被强制中断，直接删掉即可。
+
+### 图片指纹清单放在哪
+
+- **插件模式**：`<MoviePilot 数据目录>/plugins/NfoGapFill/image_manifest.json`（即插件页 `get_data_path()`）。
+- **CLI 模式**：`<第一个媒体库目录>/.nfo-backup/image_manifest.json`，可用 `--image-manifest` 指定别处。
+
+删掉它不会损坏媒体库，只是下一轮需要重新下载比对来重建指纹。
 
 ### 回滚
 

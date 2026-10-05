@@ -65,5 +65,34 @@
     "director": ["The Duffer Brothers"],
     "credits": ["The Duffer Brothers"],
     "actor": ["Winona Ryder|Joyce Byers|https://image.tmdb.org/t/p/original/d1.jpg"]
+  },
+  "season:66732:1": {
+    "title": ["第一季"],
+    "plot": ["1983年，霍金斯小镇开始出现超自然现象。"],
+    "premiered": ["2016-07-15"],
+    "season": ["1"]
+  },
+
+  "images:movie:157336": {
+    "poster": "images/poster_a.png",
+    "backdrop": "images/backdrop_a.png",
+    "logo": "images/logo_a.png"
+  },
+  "images:movie:438631": {
+    "poster": "images/poster_b.png"
+  },
+  "images:movie:1": {
+    "poster": "images/poster_a.png"
+  },
+  "images:tv:66732": {
+    "poster": "images/poster_a.png",
+    "backdrop": "images/backdrop_a.png",
+    "logo": "images/logo_a.png"
+  },
+  "images:season:66732:1": {
+    "poster": "images/season1.png"
+  },
+  "images:episode:66732:1:1": {
+    "thumb": "images/still_a.png"
   }
 }

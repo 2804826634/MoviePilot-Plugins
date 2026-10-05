@@ -1,15 +1,16 @@
 {
   "NfoGapFill": {
-    "name": "NFO 差异比对与补齐",
-    "description": "比对本地 NFO 与在线元数据：缺失补齐、不一致替换、一致跳过；支持字段保护与 NFO 锁定。",
+    "name": "NFO 与图片差异比对",
+    "description": "比对本地 NFO 与海报/背景图：缺失补齐、不一致替换、一致跳过；支持字段保护与 NFO 锁定。",
     "labels": "工具",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/2804826634/moviepilot-nfo-gapfill/main/icons/nfogapfill.png",
     "author": "MC星云",
     "level": 1,
     "v3": false,
     "release": true,
     "history": {
+      "v1.1.0": "新增图片补全：海报/背景图(+fanart 别名)/徽标/剧集缩略图/季海报，与 NFO 共用同一套「一致才跳过」判定，靠指纹清单在稳态零下载；NFO 无 tmdbid 时支持按标题搜索识别",
       "v1.0.0": "首个版本：本地 NFO 与在线元数据差异比对，按需补齐/替换，尊重 lockdata/lockedfields，支持自定义保护字段、演练模式与写入前备份"
     }
   }
