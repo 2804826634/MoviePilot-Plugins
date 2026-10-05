@@ -119,7 +119,7 @@ check("get_form 返回 (页面JSON, 默认配置) 二元组",
       and isinstance(form[0], list) and isinstance(form[1], dict))
 defaults = form[1]
 expected_keys = {"enabled", "onlyonce", "notify", "mode", "cron", "dry_run", "respect_lock",
-                 "backup", "max_files", "paths", "exclude_paths", "protect_fields",
+                 "backup", "paths", "exclude_paths", "protect_fields",
                  "only_fields", "tmdb_api_key", "language", "proxy", "cert_country", "cast_limit",
                  "image_mode", "image_kinds", "image_quality"}
 check("默认配置包含全部配置项", expected_keys <= set(defaults),
@@ -129,6 +129,54 @@ missing_controls = [k for k in expected_keys if f"'model': '{k}'" not in form_js
 check("表单里每个配置项都有对应控件", not missing_controls, f"缺控件：{missing_controls}")
 check("表单包含启用 / 立即运行 / 周期 三项关键控件",
       all(f"'model': '{k}'" in form_json for k in ("enabled", "onlyonce", "cron")))
+check("lockdata 开关没有被重复渲染", form_json.count("'model': 'respect_lock'") == 1)
+
+print()
+print("=" * 70)
+print("本次针对反馈调整的配置项")
+print("=" * 70)
+check("「单轮最多处理文件数」已移除",
+      "max_files" not in defaults and "'model': 'max_files'" not in form_json)
+check("图片类型改为复选框组（4 个 VCheckbox 共享 image_kinds）",
+      form_json.count("'component': 'VCheckbox'") == 4
+      and form_json.count("'model': 'image_kinds'") == 4)
+check("图片类型复选框显示中文名",
+      all(f"'label': '{name}'" in form_json
+          for name in ("海报", "背景图", "徽标", "剧集缩略图")))
+check("图片类型默认全选", sorted(defaults["image_kinds"]) == sorted(module.IMAGE_KINDS))
+check("演员写入上限改为下拉选项，且含「全部」",
+      "'model': 'cast_limit'" in form_json
+      and "'title': '全部（按 TMDB 返回的全写，NFO 会明显变大）', 'value': '0'" in form_json)
+check("分级地区码给了完整说明（mpaa 与各地区分级差异）",
+      "分级地区码」怎么填" in form_json and "PG-13" in form_json)
+check("字段白名单给了说明，并讲清了与保护字段的区别",
+      "字段白名单」和「保护字段」是两件不同的事" in form_json)
+check("已写明 TMDB Key / 代理留空会自动沿用 MoviePilot 的配置",
+      "自动读取 MoviePilot 里已配置的值" in form_json)
+
+# 图片类型解析：列表（复选框）与字符串（老配置 / CLI）两种载体
+def kinds_of(value):
+    probe = module.NfoGapFill.__new__(module.NfoGapFill)
+    probe._image_kinds = value
+    return probe._NfoGapFill__image_kinds_set()
+
+check("复选框列表能正确解析（大小写不敏感）", kinds_of(["poster", "LOGO"]) == {"poster", "logo"})
+check("四个框全不勾 = 不处理任何图片（不会偷偷回退成全部）", kinds_of([]) == set())
+check("老配置的逗号字符串仍兼容", kinds_of("poster, backdrop") == {"poster", "backdrop"})
+check("字符串为空 = 没配过，默认全部类型", kinds_of("") == set(module.IMAGE_KINDS))
+check("字符串写错时回退全部（避免手写错字导致静默不干活）",
+      kinds_of("posterr") == set(module.IMAGE_KINDS))
+
+# 演员上限：0 表示不限制
+cast30 = {"cast": [{"name": f"演员{i}", "character": "路人"} for i in range(30)]}
+check("演员上限 0 = 全部写入", len(module.TmdbProvider("dummy", cast_limit=0)._actors(cast30)) == 30)
+check("演员上限 10 = 只取前 10 位", len(module.TmdbProvider("dummy", cast_limit=10)._actors(cast30)) == 10)
+check("演员上限 20 = 默认取 20 位", len(module.TmdbProvider("dummy")._actors(cast30)) == 20)
+
+# 读宿主配置：命令行 / 测试环境没有 app.core.config 时必须安全降级
+check("没有宿主时读 MP 配置安全返回默认值",
+      module.mp_setting("TMDB_API_KEY", "fallback") == "fallback"
+      and module.mp_setting("NOT_EXIST_SETTING", None) is None)
 
 print()
 print("=" * 70)
@@ -269,7 +317,16 @@ print("get_page / get_command / get_api / stop_service")
 print("=" * 70)
 page = plugin.get_page()
 check("get_page 返回组件列表", isinstance(page, list) and len(page) >= 2)
-check("get_page 能读到上次报告", "扫描 NFO" in str(page))
+page_text = str(page)
+check("详情页主视图改成「本次修改了哪些文件」表格", "VDataTable" in page_text)
+check("表格列头为 文件 / 类型 / 字段变更 / 图片变更",
+      all(f"'title': '{h}'" in page_text for h in ("文件", "类型", "字段变更", "图片变更")))
+check("表格里给出了真实的媒体文件相对路径", "星际穿越" in page_text)
+check("详情页标出上次运行时间", "上次运行" in page_text)
+check("演练模式下措辞为「将要修改」", "将要修改" in page_text)
+check("详情页不再直接堆整篇文本报告", "report_text" not in page_text)
+check("结构化变更明细已落盘 last_changes.json", (DATA_PATH / "last_changes.json").exists())
+check("完整文本报告仍然保留（供深挖跳过原因）", (DATA_PATH / "last_report.txt").exists())
 check("get_command 返回空列表（不注册远程命令）", plugin.get_command() == [])
 check("get_api 返回空列表", plugin.get_api() == [])
 plugin.stop_service()

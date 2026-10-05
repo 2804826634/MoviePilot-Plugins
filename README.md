@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.1.0-blue)
+![version](https://img.shields.io/badge/version-1.2.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -188,22 +188,72 @@ docker restart moviepilot-v2
 | `dry_run` | 关 | 演练模式，不写盘 |
 | `respect_lock` | 开 | 尊重 NFO 内 `lockdata` / `lockedfields`（NFO 字段与图片都受它保护） |
 | `backup` | 开 | 写入前备份 NFO 与图片到 `.nfo-backup/` |
-| `max_files` | `0` | 单轮最多处理文件数，`0` 为不限；首次全库建议填 `50` 试水 |
+| `cast_limit` | `20` | 演员写入上限，可选 `10` / `20` / `30` / `50` / **全部**（`0` = 不限制） |
 | `paths` | 空 | 媒体库目录，每行一个 |
 | `exclude_paths` | 空 | 排除路径片段，命中即跳过 |
-| `protect_fields` | 空 | 保护字段，逗号分隔，如 `plot,tagline,actor` |
-| `only_fields` | 空 | 只处理这些字段，留空为全部 |
-| `tmdb_api_key` | 空 | TMDB API Key；**留空则复用 MP 自身刮削通道（无需申请，但图片只能取到海报与背景图）** |
+| `protect_fields` | 空 | 保护字段：照常比对，但**只补不换**，永不覆盖已有内容 |
+| `only_fields` | 空 | 字段白名单：**只管列出的字段**，其余完全不参与比对（既不补也不换） |
+| `tmdb_api_key` | 空 | TMDB API Key。**留空 = 自动读取 MoviePilot 里配置的 `TMDB_API_KEY`** |
 | `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`） |
-| `proxy` | 空 | 代理，留空则用宿主网络 |
-| `cert_country` | `US` | 分级地区码，决定 `mpaa` 取值 |
-| `cast_limit` | `20` | 演员写入上限 |
+| `proxy` | 空 | 网络代理。**留空 = 自动读取 MoviePilot 里配置的 `PROXY_HOST`** |
+| `cert_country` | `US` | 分级地区码，决定 NFO 的 `<mpaa>` 取哪个地区的分级（见下） |
 | `image_mode` | `sync` | 图片处理：`sync` / `missing` / `off`，见上节 |
-| `image_kinds` | `poster,backdrop,logo,thumb` | 处理的图片类型，逗号分隔 |
+| `image_kinds` | 四种全选 | 处理的图片类型，**复选框**：海报 / 背景图 / 徽标 / 剧集缩略图（全不勾 = 不处理图片） |
 | `image_quality` | `standard` | 画质档：`standard`（海报 w780 / 背景图 w1280 / 徽标 w500）或 `original`（最清晰、体积大） |
 
-**建议首跑流程**：`mode=report` + `dry_run=开` → 看报告里的差异清单是否符合预期 → 再切 `mode=sync`。
+### 两个容易混的字段配置
+
+| | 参与比对 | 缺失时补 | 已有内容是否会被覆盖 |
+| --- | --- | --- | --- |
+| **字段白名单** `only_fields` | 仅列出的字段 | ✅ | 列出的字段会 |
+| **保护字段** `protect_fields` | ✅ | ✅ | ❌ 永不覆盖 |
+
+两者可以叠加使用，例如：`only_fields = plot,rating` 把维护范围缩到两项，
+再 `protect_fields = plot` 表示简介只补不换。
+
+字段名用 NFO 的标签名（小写、逗号分隔）。可用的字段：
+
+- **电影**：`title` `originaltitle` `plot` `tagline` `year` `premiered` `runtime` `mpaa` `rating` `genre` `studio` `country` `director` `credits` `actor`
+- **剧集 tvshow**：`title` `plot` `tagline` `year` `premiered` `runtime` `mpaa` `rating` `genre` `studio` `country` `actor`
+- **单集 episode**：`title` `plot` `aired` `rating` `season` `episode` `director` `credits` `actor`
+- **季 season**：`title` `plot` `premiered` `season`
+
+### 分级地区码（`cert_country`）到底管什么
+
+NFO 里的 `<mpaa>` 标签存的其实是**影视分级**（`PG-13`、`R` 这类），而 TMDB 上同一部片在不同国家分级并不一样，
+这个配置就决定取哪一份：
+
+| 填什么 | `<mpaa>` 可能得到 |
+| --- | --- |
+| `US`（默认） | `PG-13` / `R` / `PG` |
+| `GB` | `12` / `15` / `18` |
+| `JP` | `G` / `PG12` / `R15+` |
+| `DE` | `FSK 12` / `FSK 16` |
+
+> 中国大陆没有官方影视分级体系，填 `CN` 通常取不到值。若所选地区恰好缺该片的分级，
+> 会自动退回到任意有值的地区，**不会留空**。
+
+**建议首跑流程**：`mode=report` + `dry_run=开` → 详情页会列出**将要修改哪些文件** → 确认无误后切 `mode=sync`。
 图片若担心首轮流量，可先设 `image_mode=missing` 只补空缺。
+
+---
+
+## 界面：详情页看什么
+
+运行结束后，插件详情页的主视图是**「本次修改了哪些文件」表格**：
+
+| 文件 | 类型 | 字段变更 | 图片变更 |
+| --- | --- | --- | --- |
+| 电影/星际穿越 (2014)/movie.nfo | 电影 | `plot · 补齐`、`genre · 替换` | `poster → poster.jpg · 补齐` |
+| 电影/沙丘 (2021)/沙丘 (2021).nfo | 电影 | `year · 替换` | — |
+
+- **演练 / 只报告模式下也会列出清单**，措辞是「将要修改」，方便先体检再动手。
+- 表格只列**会写盘**的文件；被跳过的条目（NFO 锁定、保护字段、`gapfill` 只补缺失、图片仅补缺失等）
+  不会出现在表格里——完整原因见插件数据目录下的 `last_report.txt`（仍然照常生成）。
+- 顶部另有概要：本轮扫描了多少 NFO / 图片、实际改了多少。
+
+> 顺带一提：数据目录通常是 `<MoviePilot>/data/plugins/NfoGapFill/`，里面有 `last_report.txt`
+> （完整文本报告）与 `last_changes.json`（详情页表格用的结构化明细）。
 
 ---
 
@@ -234,7 +284,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 51 项断言（含图片补齐/别名/指纹幂等/替换/备份）
-python tests/_self_test_plugin.py   # 插件面 52 项断言（伪造 MP 宿主 + 图片单元测试）
+python tests/_self_test_plugin.py   # 插件面 77 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹单元测试）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
@@ -283,7 +333,8 @@ moviepilot-nfo-gapfill/
 - **不提供 banner / clearart / discart / landscape**：这些画集 TMDB 没有，只有 fanart.tv 提供，需要额外申请其 API Key，不在本插件范围内。所以本插件是「补齐 + 纠错」，不是「全画集刮削」，可以和 fanart.tv 类工具并存。
 - **剧集缩略图要求该集存在 NFO**：本插件以 NFO 为扫描入口，没有 NFO 的集不会被处理（电影/剧集/季同理）。
 - **`HostProvider`（复用 MP 刮削通道、免 API Key）能力有限**：字段映射在不同 MP 版本上未逐一验证，属「尽力而为」；图片只能取到海报与背景图（`MediaInfo.poster_path` / `backdrop_path`），剧集缩略图 / 季海报 / 徽标需要填写 TMDB API Key 走直连。
-- **首轮图片有流量开销**：库里已有图片需要下载后才能判定是否一致；之后靠指纹清单零下载。库特别大时先用 `max_files` 或 `image_mode=missing` 分批。
+- **首轮图片有流量开销**：库里已有图片需要下载后才能判定是否一致；之后靠指纹清单零下载。
+  库特别大时，可以先把「媒体库目录」填成某个子目录分批跑，或先设 `image_mode=missing` 只补空缺。
 - **写回后仍需让媒体服务器刷新**（MP 的「媒体库服务器刷新」插件，或在 Emby/Jellyfin 手动「刷新元数据」）。
 - **硬链接做种库**请确认 `PUID/PGID/UMASK` 对媒体目录可写，否则会静默失败。
 - 与官方「媒体库刮削」建议**二选一**：本插件已覆盖 NFO 与图片，同时开启两边可能互相覆盖。

@@ -69,6 +69,26 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
     一致的判定靠 image_manifest.json 指纹清单：记录「这张图来自哪个 URL、内容 sha256」，
     因此稳态下零下载即可判定「相同」。首次运行需要下载比对以建立指纹（有流量开销）。
     banner / clearart / discart / landscape 只有 fanart.tv 提供，不在本插件范围内。
+
+────────────────────────────────────────────────────────────────────────
+五、与 MoviePilot 的配置联动（留空即自动继承，通常都不用填）
+    TMDB API Key  留空 → 自动读取 MoviePilot 里配置的 TMDB_API_KEY
+    网络代理      留空 → 自动读取 MoviePilot 里配置的 PROXY_HOST
+    两者都拿不到时才退回宿主刮削通道（该通道只有海报与背景图）。
+
+    分级地区码 决定 NFO 里 <mpaa> 取哪个国家/地区的分级：
+        US → PG-13 / R　　GB → 12 / 15 / 18　　JP → G / PG12 / R15+
+        中国大陆没有官方影视分级体系，填 CN 通常取不到值；
+        若所选地区恰好缺该片分级，会自动退回到任意有值的地区，不会留空。
+
+    演员写入上限 可选 10 / 20 / 30 / 50 / 全部（全部 = 0，不限制）。
+
+    字段白名单（only_fields）与保护字段（protect_fields）的区别：
+        白名单   —— 只管列出的这些字段，其余完全不参与比对（既不补也不换）
+        保护字段 —— 照常参与比对，但只补不换，永远不会覆盖你已有的内容
+
+    详情页展示的是「本次修改了哪些文件」表格（含演练/只报告模式下的待改动清单）；
+    完整文本报告（含每一条跳过的原因）写在插件数据目录的 last_report.txt。
 """
 
 from __future__ import annotations
@@ -140,7 +160,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
@@ -166,6 +186,25 @@ IMAGE_KIND_CN = {"poster": "海报", "backdrop": "背景图", "logo": "徽标", 
 IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
 
 UA = f"NfoGapFill/{PLUGIN_VERSION} (+MoviePilot plugin)"
+
+
+def mp_setting(name: str, default: Any = None) -> Any:
+    """读取 MoviePilot 宿主的配置项（如 TMDB_API_KEY / PROXY_HOST / TMDB_LOCALE）。
+
+    宿主用的是 pydantic-settings 单例，用户在 UI 里改过之后是实时生效的，
+    所以每次构建数据源时读一次即可拿到最新值。取不到（命令行环境、字段不存在、
+    值为空串）时返回 default，绝不抛异常。
+    """
+    try:
+        from app.core.config import settings  # type: ignore
+    except Exception:
+        return default
+    value = getattr(settings, name, None)
+    if value is None:
+        return default
+    if isinstance(value, str) and not value.strip():
+        return default
+    return value
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -652,12 +691,14 @@ class TmdbProvider:
         return out
 
     def _actors(self, credits: dict) -> List[str]:
-        return [
+        # cast_limit <= 0 表示不限制（全部写入）
+        people = [
             ACTOR_SEP.join([(a.get("name") or "").strip(), (a.get("character") or "").strip(),
                             (IMG_BASE + a["profile_path"]) if a.get("profile_path") else ""])
             for a in (credits or {}).get("cast") or []
             if (a.get("name") or "").strip()
-        ][: self.cast_limit]
+        ]
+        return people if self.cast_limit <= 0 else people[: self.cast_limit]
 
     def fetch_movie(self, tmdb_id: str) -> Dict[str, List[str]]:
         data = self._get(f"/movie/{tmdb_id}", append_to_response="credits,release_dates")
@@ -799,11 +840,12 @@ class HostProvider:
 
     name = "MoviePilot 宿主链路"
 
-    def __init__(self, image_quality: str = "standard") -> None:
+    def __init__(self, image_quality: str = "standard", cast_limit: int = 20) -> None:
         self._chain = None
         self._failed = False
         self._opener_obj = None
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
+        self.cast_limit = cast_limit
 
     def _media_chain(self):
         if self._failed:
@@ -841,7 +883,7 @@ class HostProvider:
         return None
 
     @staticmethod
-    def _info_to_fields(info: Any, is_tv: bool) -> Dict[str, List[str]]:
+    def _info_to_fields(info: Any, is_tv: bool, limit: int = 20) -> Dict[str, List[str]]:
         def g(*names: str) -> Any:
             for name in names:
                 value = getattr(info, name, None)
@@ -849,8 +891,11 @@ class HostProvider:
                     return value
             return None
 
+        people = list(g("actors") or [])
+        if limit > 0:
+            people = people[:limit]
         actors = []
-        for person in (g("actors") or [])[:20]:
+        for person in people:
             actors.append(ACTOR_SEP.join([
                 str(getattr(person, "name", "") or "").strip(),
                 str(getattr(person, "role", "") or "").strip(),
@@ -881,11 +926,11 @@ class HostProvider:
 
     def fetch_movie(self, tmdb_id: str) -> Dict[str, List[str]]:
         info = self._recognize(tmdb_id, False)
-        return self._info_to_fields(info, False) if info else {}
+        return self._info_to_fields(info, False, self.cast_limit) if info else {}
 
     def fetch_tvshow(self, tmdb_id: str) -> Dict[str, List[str]]:
         info = self._recognize(tmdb_id, True)
-        return self._info_to_fields(info, True) if info else {}
+        return self._info_to_fields(info, True, self.cast_limit) if info else {}
 
     def fetch_episode(self, tmdb_id: str, season: str, episode: str) -> Dict[str, List[str]]:
         logger.warning("宿主链路暂不支持单集简介比对，建议为插件填写 TMDB API Key")
@@ -1108,6 +1153,36 @@ class Report:
                 lines.append(f"    在线：{(c.remote or '（空）')[:140]}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _needs_write(action: str) -> bool:
+        """这条记录是否代表「会写盘」（演练 / 只报告模式下的待执行也算）。"""
+        return bool(action) and not any(token in action for token in ("跳过", "未比对"))
+
+    def change_rows(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """按文件聚合「本次改了什么」，供插件详情页表格直接渲染。
+
+        只收会写盘的条目：跳过（锁定 / 保护字段 / gapfill / 仅补缺失）与「未比对」都不算改动；
+        演练与只报告模式下的「仅报告（应为补齐）」也算，这样首轮体检就能看清将要改哪些文件。
+        """
+        agg: Dict[str, Dict[str, Any]] = {}
+        for c in self.changes:
+            if not self._needs_write(c.action):
+                continue
+            row = agg.setdefault(c.nfo, {"file": c.nfo, "kind": "", "fields": [], "images": []})
+            if c.media_type != "图片" and not row["kind"]:
+                row["kind"] = c.media_type
+            bucket = "images" if c.media_type == "图片" else "fields"
+            name = c.field.replace("[图片] ", "") if bucket == "images" else c.field
+            item = f"{name} · {c.action}"
+            if item not in row[bucket]:
+                row[bucket].append(item)
+        return [{
+            "file": row["file"],
+            "kind": row["kind"] or "图片",
+            "fields": "、".join(row["fields"])[:150] or "—",
+            "images": "、".join(row["images"])[:150] or "—",
+        } for row in agg.values()][:limit]
+
 
 # ══════════════════════════════════════════════════════════════════════
 # 引擎主流程
@@ -1296,7 +1371,8 @@ class Engine:
             if is_locked:
                 applied, do_write = "跳过（NFO 字段锁定）", False
             elif self.cfg.mode == "report":
-                applied, do_write = "仅报告", False
+                # 带上「应为……」是为了让详情页在只报告模式下也能显示「将要修改哪些文件」
+                applied, do_write = f"仅报告（应为{action}）", False
             elif self.cfg.mode == "gapfill" and action == REPLACE:
                 applied, do_write = "跳过（gapfill 只补缺失）", False
             elif self.cfg.mode != "force" and action == REPLACE and name in self.cfg.protect_fields:
@@ -1477,6 +1553,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     # 可使用的用户级别
     user_level = 1
 
+    # 详情页表格里的类型显示名
+    KIND_CN = {"movie": "电影", "tvshow": "剧集", "season": "季", "episodedetails": "单集"}
+
     # 运行态
     _enabled: bool = False
     _onlyonce: bool = False
@@ -1494,10 +1573,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _proxy: str = ""
     _cert_country: str = "US"
     _cast_limit: str = "20"
-    _max_files: str = "0"
     _notify: bool = True
     _image_mode: str = IMG_SYNC
-    _image_kinds: str = "poster,backdrop,logo,thumb"
+    _image_kinds: Any = IMAGE_KINDS          # 列表或逗号分隔字符串都接受
     _image_quality: str = "standard"
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
@@ -1521,10 +1599,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._proxy = (config.get("proxy") or "").strip()
             self._cert_country = (config.get("cert_country") or "US").strip()
             self._cast_limit = str(config.get("cast_limit") or "20")
-            self._max_files = str(config.get("max_files") or "0")
             self._notify = bool(config.get("notify", True))
             self._image_mode = config.get("image_mode") or IMG_SYNC
-            self._image_kinds = config.get("image_kinds") or "poster,backdrop,logo,thumb"
+            # 图片类型用复选框组存成列表；老配置里是逗号字符串，None 表示还没配过
+            kinds = config.get("image_kinds")
+            self._image_kinds = list(IMAGE_KINDS) if kinds is None else kinds
             self._image_quality = config.get("image_quality") or "standard"
 
         self.stop_service()
@@ -1601,11 +1680,19 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "component": "VRow",
                         "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSwitch", "props": {"model": "backup", "label": "写入前备份原 NFO / 图片"}}]},
+                                {"component": "VSwitch", "props": {
+                                    "model": "backup", "label": "写入前备份原 NFO / 图片到 .nfo-backup"}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "max_files", "label": "单轮最多处理文件数",
-                                    "placeholder": "0 表示不限；首次全库建议填 50 试水"}}]},
+                                {"component": "VSelect", "props": {
+                                    "model": "cast_limit",
+                                    "label": "演员写入上限",
+                                    "items": [
+                                        {"title": "10 位（文件更小）", "value": "10"},
+                                        {"title": "20 位（默认）", "value": "20"},
+                                        {"title": "30 位", "value": "30"},
+                                        {"title": "50 位", "value": "50"},
+                                        {"title": "全部（按 TMDB 返回的全写，NFO 会明显变大）", "value": "0"},
+                                    ]}}]},
                         ],
                     },
                     {
@@ -1633,10 +1720,18 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "image_kinds", "label": "处理的图片类型",
-                                    "placeholder": "逗号分隔：poster,backdrop,logo,thumb（thumb = 剧集缩略图）"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                                {"component": "VCheckbox", "props": {
+                                    "model": "image_kinds", "value": "poster", "label": "海报"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                                {"component": "VCheckbox", "props": {
+                                    "model": "image_kinds", "value": "backdrop", "label": "背景图"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                                {"component": "VCheckbox", "props": {
+                                    "model": "image_kinds", "value": "logo", "label": "徽标"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                                {"component": "VCheckbox", "props": {
+                                    "model": "image_kinds", "value": "thumb", "label": "剧集缩略图"}}]},
                         ],
                     },
                     {
@@ -1644,8 +1739,14 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "图片沿用同一套「一致才跳过」逻辑：先比对本地图与在线图，一致不动、"
-                                         "不一致才替换 —— 官方「媒体库刮削」只判断文件在不在，"
+                                 "text": "上面四项就是要处理的图片类型，全部不勾选等同于关闭图片处理。"
+                                         "勾选后落盘的文件名（与 Kodi / Jellyfin 约定一致）："
+                                         "海报 → poster.jpg；背景图 → backdrop.jpg 并额外写一份 fanart.jpg；"
+                                         "徽标 → logo.png；剧集缩略图 → 与该集视频同名的 .jpg。"
+                                         "季海报会跟随「海报」一起处理，写在季目录 poster.jpg 并同步一份到剧集根目录 "
+                                         "seasonNN-poster.jpg。"
+                                         "图片沿用与 NFO 相同的「一致才跳过」逻辑：先比对本地图与在线图，"
+                                         "一致不动、不一致才替换 —— 官方「媒体库刮削」只判断文件在不在，"
                                          "所以低清图、错图永远不会被换掉。首次运行需要下载比对以建立指纹，"
                                          "之后靠指纹零下载判定。剧集缩略图要求该集存在 NFO。"}]},
                         ],
@@ -1677,8 +1778,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VTextField", "props": {
-                                    "model": "tmdb_api_key", "label": "TMDB API Key（留空则尝试使用 MP 自身通道）",
-                                    "placeholder": "在 themoviedb.org 免费申请"}}]},
+                                    "model": "tmdb_api_key",
+                                    "label": "TMDB API Key（留空 = 自动使用 MoviePilot 里配置的 Key）",
+                                    "placeholder": "通常留空即可；只有在想用另一个 Key 时才填"}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VSelect", "props": {
                                     "model": "language", "label": "元数据语言",
@@ -1695,12 +1797,43 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VTextField", "props": {
-                                    "model": "only_fields", "label": "只处理这些字段（留空=全部）",
-                                    "placeholder": "逗号分隔，例如 plot,rating"}}]},
+                                    "model": "only_fields",
+                                    "label": "字段白名单（只处理列出的字段）",
+                                    "placeholder": "留空 = 处理全部；例如 plot,rating,actor"}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VTextField", "props": {
-                                    "model": "proxy", "label": "代理（留空则用宿主网络）",
+                                    "model": "proxy",
+                                    "label": "网络代理（留空 = 自动沿用 MoviePilot 里的代理）",
                                     "placeholder": "http://192.168.1.2:7890"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "「字段白名单」和「保护字段」是两件不同的事，容易混："
+                                         "白名单是「只管这些」—— 列出以外的字段完全不参与比对，既不补也不换，"
+                                         "相当于把一个媒体库的维护范围缩小到你关心的几项；"
+                                         "保护字段是「照常比对，但只补不换」—— 仍会参与比对、缺失会补，"
+                                         "只是永远不覆盖你已有的内容。"
+                                         "两者可以同时用。字段名要写 NFO 的标签名（小写、逗号分隔），"
+                                         "电影可用：title, originaltitle, plot, tagline, year, premiered, "
+                                         "runtime, mpaa, rating, genre, studio, country, director, credits, actor；"
+                                         "剧集 tvshow 可用：title, plot, tagline, year, premiered, runtime, mpaa, "
+                                         "rating, genre, studio, country, actor；"
+                                         "单集可用：title, plot, aired, rating, season, episode, director, credits, actor；"
+                                         "季可用：title, plot, premiered, season。"}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "「TMDB API Key」与「网络代理」留空时会自动读取 MoviePilot 里已配置的值，"
+                                         "所以多数情况下两项都不用填。只有当 MoviePilot 里也没有可用的 Key 时，"
+                                         "才会退回宿主的刮削通道（该通道拿不到剧集缩略图、季海报和徽标）。"}]},
                         ],
                     },
                     {
@@ -1708,12 +1841,21 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VTextField", "props": {
-                                    "model": "cert_country", "label": "分级地区码",
-                                    "placeholder": "US / CN / JP，决定 mpaa 字段取哪个地区的分级"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "cast_limit", "label": "演员写入上限",
-                                    "placeholder": "默认 20"}}]},
+                                    "model": "cert_country",
+                                    "label": "分级地区码（决定 mpaa 取哪个地区的分级）",
+                                    "placeholder": "US / GB / JP / DE …（两位 ISO 国家码）"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "「分级地区码」怎么填：NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），"
+                                         "而 TMDB 上同一部片在不同国家的分级并不一样，这个配置就决定取哪一份 —— "
+                                         "填 US 得到 PG-13 / R，填 GB 得到 12 / 15 / 18，填 JP 得到 G / PG12 / R15+。"
+                                         "注意中国大陆没有官方影视分级体系，填 CN 通常取不到值；"
+                                         "若所选地区恰好缺该片的分级，会自动退回到任意有值的地区，不会留空。"}]},
                         ],
                     },
                     {
@@ -1731,7 +1873,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
-                                 "text": "建议先用「只报告差异 + 演练模式」跑一轮，确认差异清单符合预期后再切换为「不一致则替换」。"}]},
+                                 "text": "建议先用「只报告差异 + 演练模式」跑一轮：运行结束后本页会列出«将要修改哪些文件»，"
+                                         "对着清单确认无误，再切换为「不一致则替换」正式执行。"}]},
                         ],
                     },
                 ],
@@ -1745,7 +1888,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "dry_run": False,
             "respect_lock": True,
             "backup": True,
-            "max_files": "0",
             "paths": "",
             "exclude_paths": "",
             "protect_fields": "",
@@ -1756,11 +1898,100 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "cert_country": "US",
             "cast_limit": "20",
             "image_mode": IMG_SYNC,
-            "image_kinds": "poster,backdrop,logo,thumb",
+            "image_kinds": list(IMAGE_KINDS),
             "image_quality": "standard",
         }
 
     def get_page(self) -> List[dict]:
+        """详情页主视图 =「本次修改了哪些文件」的表格。
+
+        完整文本报告（含每条跳过的原因）仍然写进插件数据目录的 last_report.txt，
+        需要深挖时去那里翻；页面上只保留最需要一眼看到的改动清单。
+        """
+        data = self.__load_changes()
+        if not data:
+            return self.__page_fallback()
+
+        rows = []
+        for row in data.get("rows") or []:
+            kind = row.get("kind") or ""
+            rows.append({
+                "file": row.get("file", ""),
+                "kind": self.KIND_CN.get(kind, kind),
+                "fields": row.get("fields", "—"),
+                "images": row.get("images", "—"),
+            })
+
+        changed = int(data.get("changed_files") or 0)
+        images_written = int(data.get("images_written") or 0)
+        scanned = int(data.get("scanned") or 0)
+        images_scanned = int(data.get("images_scanned") or 0)
+        dry = bool(data.get("dry_run"))
+        preview = dry or data.get("mode") == "report"
+        verb = "将要修改" if preview else "本次修改"
+
+        blocks: List[dict] = [
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VAlert", "props": {
+                        "type": "info", "variant": "tonal",
+                        "text": f"NFO 与图片差异比对 v{PLUGIN_VERSION}"
+                                f"　模式：{data.get('mode', self._mode)}"
+                                f"　图片：{self._image_mode}"
+                                f"　上次运行：{data.get('finished', '未知')}"
+                                + ("　（演练中，未写盘）" if dry else "")}}]},
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VAlert", "props": {
+                        "type": "success" if rows else "warning", "variant": "tonal",
+                        "text": (f"{verb} {changed} 个 NFO、{images_written} 张图片"
+                                 f"（本轮共扫描 {scanned} 个 NFO / {images_scanned} 张图片，"
+                                 f"其余均与在线一致或被规则跳过）"
+                                 if rows else
+                                 f"本次没有需要修改的内容"
+                                 f"（扫描 {scanned} 个 NFO / {images_scanned} 张图片，全部已是最新）")}}]},
+            ]},
+        ]
+
+        if rows:
+            blocks.append({"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VDataTable", "props": {
+                        "headers": [
+                            {"title": "文件", "key": "file"},
+                            {"title": "类型", "key": "kind"},
+                            {"title": "字段变更", "key": "fields"},
+                            {"title": "图片变更", "key": "images"},
+                        ],
+                        "items": rows,
+                        "density": "compact",
+                        "hover": True,
+                    }}]},
+            ]})
+
+        errors = data.get("errors") or []
+        if errors:
+            blocks.append({"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VAlert", "props": {
+                        "type": "warning", "variant": "tonal",
+                        "text": f"另有 {len(errors)} 条无法比对 / 失败："
+                                + "；".join(str(item) for item in errors[:5])}}]},
+            ]})
+
+        blocks.append({"component": "VRow", "content": [
+            {"component": "VCol", "props": {"cols": 12}, "content": [
+                {"component": "VAlert", "props": {
+                    "type": "info", "variant": "tonal",
+                    "text": "表格只列「会写盘」的文件；被跳过的条目（NFO 锁定、保护字段、"
+                            "gapfill 只补缺失、图片仅补缺失等）不会出现在这里，"
+                            "完整原因见插件数据目录下的 last_report.txt。"}}]},
+        ]})
+        return blocks
+
+    def __page_fallback(self) -> List[dict]:
+        """还没有结构化明细时（老版本遗留数据 / 明细写入失败）退回展示文本报告。"""
         text = self.__load_last_report() or "尚未运行过。保存配置时勾选「保存后立即运行一次」即可产生结果。"
         head = text.splitlines()
         return [
@@ -1833,7 +2064,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "dry_run": self._dry_run,
                 "respect_lock": self._respect_lock,
                 "backup": self._backup,
-                "max_files": self._max_files,
                 "paths": self._paths,
                 "exclude_paths": self._exclude_paths,
                 "protect_fields": self._protect_fields,
@@ -1865,6 +2095,18 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
         except Exception:
             return ""
 
+    def __changes_file(self) -> Path:
+        """结构化变更明细，供详情页表格渲染（与纯文本报告并列存放）。"""
+        return self.__report_file().with_name("last_changes.json")
+
+    def __load_changes(self) -> dict:
+        try:
+            path = self.__changes_file()
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
     def __manifest_file(self) -> Path:
         try:
             base = Path(self.get_data_path())
@@ -1875,12 +2117,21 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
 
     def __build_provider(self):
         quality = self._image_quality if self._image_quality in IMG_SIZES else "standard"
-        if self._tmdb_api_key:
-            return TmdbProvider(self._tmdb_api_key, self._language, self._proxy or None,
-                                self._cert_country, self.__int(self._cast_limit, 20), quality)
-        logger.info("未配置 TMDB API Key，尝试使用 MoviePilot 宿主链路"
-                    "（该通道只能取到海报与背景图，剧集缩略图 / 季海报 / 徽标需填写 API Key）")
-        return HostProvider(quality)
+        limit = self.__int(self._cast_limit, 20)
+        # Key 与代理：插件里填了就用插件的，否则自动沿用 MoviePilot 里配置的值
+        own_key = (self._tmdb_api_key or "").strip()
+        own_proxy = (self._proxy or "").strip()
+        key = own_key or str(mp_setting("TMDB_API_KEY", "") or "").strip()
+        proxy = own_proxy or str(mp_setting("PROXY_HOST", "") or "").strip()
+        if key:
+            logger.info("TMDB 数据源：%s%s" % (
+                "插件内单独配置的 API Key" if own_key else "自动读取 MoviePilot 中配置的 API Key",
+                ("，代理沿用宿主的" if (proxy and not own_proxy) else "")))
+            return TmdbProvider(key, self._language, proxy or None,
+                                self._cert_country, limit, quality)
+        logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
+                       "（该通道只能取到海报与背景图，剧集缩略图 / 季海报 / 徽标将不可用）")
+        return HostProvider(quality, limit)
 
     @staticmethod
     def __int(value: Any, default: int) -> int:
@@ -1898,9 +2149,25 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
         return {item.strip().casefold() for item in re.split(r"[,\s]+", text or "") if item.strip()}
 
     def __image_kinds_set(self) -> set:
-        """解析「处理的图片类型」。留空或全填错时回退为全部类型，避免静默什么都不做。"""
-        picked = {item.strip().casefold() for item in re.split(r"[,\s]+", self._image_kinds or "")
-                  if item.strip()}
+        """解析「处理的图片类型」。
+
+        表单里是多选框，存成列表；老配置和 CLI 传的是逗号分隔字符串，两种都要能吃下。
+        两种载体的「空」含义不同，故意区别对待：
+
+        - **列表为空** → 用户把四个框全取消了，就是明确表示不处理图片，返回空集合；
+        - **字符串为空** → 没配过，返回全部类型；
+        - **字符串有值但一个都没解析对** → 大概率是手写错字，回退全部，避免静默什么都不做。
+        """
+        raw = self._image_kinds
+        if isinstance(raw, (list, tuple, set)):
+            picked = {str(item).strip().casefold() for item in raw if str(item).strip()}
+            return picked & set(IMAGE_KINDS)
+
+        text = str(raw or "").strip()
+        if not text:
+            return set(IMAGE_KINDS)
+        picked = {item.strip().casefold()
+                  for item in re.split(r"[,\s]+", text) if item.strip()}
         return (picked & set(IMAGE_KINDS)) or set(IMAGE_KINDS)
 
     def __run(self) -> None:
@@ -1918,7 +2185,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 respect_lock=self._respect_lock,
                 dry_run=self._dry_run,
                 backup=self._backup,
-                max_files=self.__int(self._max_files, 0),
+                max_files=0,          # 插件不再提供单轮上限（引擎仍支持，CLI 用 --max-files）
                 image_mode=(self._image_mode if self._image_mode in (IMG_OFF, IMG_MISSING, IMG_SYNC)
                             else IMG_SYNC),
                 image_kinds=self.__image_kinds_set(),
@@ -1946,6 +2213,21 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 })
             except Exception:
                 pass
+
+            try:
+                self.__changes_file().write_text(json.dumps({
+                    "finished": report.finished, "mode": report.mode,
+                    "dry_run": self._dry_run, "provider": report.provider,
+                    "scanned": report.scanned, "changed_files": report.changed_files,
+                    "unchanged": report.untouched,
+                    "images_scanned": report.images_scanned,
+                    "images_written": report.images_written,
+                    "image_bytes": report.image_bytes,
+                    "errors": report.errors[:15],
+                    "rows": report.change_rows(),
+                }, ensure_ascii=False, indent=1), encoding="utf-8")
+            except Exception as exc:
+                logger.warning(f"写入变更明细失败（详情页会退化为展示完整报告）：{exc}")
 
             if self._notify:
                 self.__notify(report)
@@ -1979,7 +2261,7 @@ def build_cli_provider(args) -> Any:
             raise SystemExit("--source file 需要同时指定 --cache <json 路径>")
         return FileProvider(args.cache)
     if args.source == "host":
-        return HostProvider(args.image_quality)
+        return HostProvider(args.image_quality, args.cast_limit)
     if not args.api_key:
         raise SystemExit("--source tmdb 需要 --api-key，或设置环境变量 TMDB_API_KEY")
     return TmdbProvider(args.api_key, args.lang, args.proxy or None, args.cert_country,
@@ -2012,7 +2294,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--lang", default="zh-CN", help="元数据语言，默认 zh-CN")
     parser.add_argument("--proxy", default=None, help="代理，如 http://127.0.0.1:7890")
     parser.add_argument("--cert-country", default="US", help="分级地区码，默认 US")
-    parser.add_argument("--cast-limit", type=int, default=20, help="演员数量上限，默认 20")
+    parser.add_argument("--cast-limit", type=int, default=20, help="演员写入上限，默认 20；0 = 全部写入")
     parser.add_argument("--max-files", type=int, default=0, help="单轮最多处理多少个 NFO")
     parser.add_argument("--no-backup", action="store_true", help="不备份原文件（不推荐）")
     parser.add_argument("--backup-dir", default="", help="备份目录，默认 <root>/.nfo-backup")
