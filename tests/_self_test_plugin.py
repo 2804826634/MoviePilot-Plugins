@@ -650,6 +650,139 @@ check("① 剧集 id 也来自目录名（tmdb:21712）",
 
 print()
 print("=" * 70)
+print("网络抖动自动重试（用户日志里的 SSL handshake timed out）")
+print("=" * 70)
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read(self):
+        return json.dumps(self._payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FlakyOpener:
+    """前 fail_times 次抛网络异常，之后返回数据。"""
+
+    def __init__(self, fail_times, payload=None, error=None):
+        self.fail_times = fail_times
+        self.calls = 0
+        self.payload = payload if payload is not None else {"title": "ok"}
+        self.error = error or OSError(
+            "<urlopen error _ssl.c:993: The handshake operation timed out>")
+
+    def open(self, request, timeout=None):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self.error
+        return _FakeHttpResponse(self.payload)
+
+
+def _provider_with(opener):
+    prov = module.TmdbProvider("KEY", "zh-CN", None, "US", 20, "standard")
+    prov.limiter = module.RateLimiter(0)      # 测试里不限速
+    prov.opener = opener
+    return prov
+
+
+_orig_wait = module.TMDB_RETRY_WAIT
+module.TMDB_RETRY_WAIT = 0.01                 # 测试里别真等
+try:
+    flaky = _FlakyOpener(2)
+    prov = _provider_with(flaky)
+    check("SSL 握手超时会被自动重试，最终成功拿到数据",
+          prov._get("/movie/137") == {"title": "ok"} and flaky.calls == 3, f"calls={flaky.calls}")
+    check("重试次数记在 provider.retries（报告里会显示）", prov.retries == 2, str(prov.retries))
+    check("「在线请求」按实际尝试次数计", prov.calls == 3, str(prov.calls))
+
+    dead = _FlakyOpener(99)
+    prov2 = _provider_with(dead)
+    check("重试用尽才放弃并返回 None", prov2._get("/movie/1") is None and dead.calls == 3,
+          f"calls={dead.calls}")
+
+    class _NotFoundOpener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, request, timeout=None):
+            self.calls += 1
+            raise module.urllib.error.HTTPError("u", 404, "Not Found", None, None)
+
+    nf = _NotFoundOpener()
+    prov3 = _provider_with(nf)
+    check("404 不重试（资源不存在，重试没意义）",
+          prov3._get("/movie/1") is None and nf.calls == 1 and prov3.retries == 0,
+          f"calls={nf.calls} retries={prov3.retries}")
+
+    class _LimitedOpener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, request, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise module.urllib.error.HTTPError("u", 429, "Too Many", None, None)
+            return _FakeHttpResponse({"title": "ok"})
+
+    lim = _LimitedOpener()
+    prov4 = _provider_with(lim)
+    check("被限流（429）也会重试", prov4._get("/movie/1") == {"title": "ok"} and lim.calls == 2,
+          f"calls={lim.calls}")
+
+    check("报告里有「网络抖动自动重试」这一行",
+          "网络抖动自动重试" in module.Report(retried=7).to_text())
+finally:
+    module.TMDB_RETRY_WAIT = _orig_wait
+
+print()
+print("=" * 70)
+print("回归：没有第 0 季的剧不该被写出 season00-poster.jpg")
+print("=" * 70)
+check("中文数字转换：一/十/十二/二十/二十一",
+      module.cn_number("一") == 1 and module.cn_number("十") == 10
+      and module.cn_number("十二") == 12 and module.cn_number("二十") == 20
+      and module.cn_number("二十一") == 21 and module.cn_number("九十九") == 99
+      and module.cn_number("") is None and module.cn_number("abc") is None)
+check("中文季目录名也能认：第一季 / 第十二季",
+      module.season_from_dir("第一季") == "1"
+      and module.season_from_dir("第十二季") == "12"
+      and module.season_from_dir("第二季") == "2", str(module.season_from_dir("第一季")))
+
+# 复现用户日志：走向共和 (2003) {tmdbid=66498}/第一季/season.nfo，且 NFO 里没有 <season>
+# 旧版：取名用「默认 0」→ 写出 season00-poster.jpg；取图用另一套解析 → 拿到第 1 季的图
+xiang = DATA_PATH / "dirid" / "电视剧" / "国产剧" / "走向共和 (2003) {tmdbid=66498}" / "第一季"
+xiang.mkdir(parents=True, exist_ok=True)
+xiang_nfo_path = xiang / "season.nfo"
+xiang_nfo_path.write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<season>\n'
+    '  <title>第一季</title>\n</season>\n', encoding="utf-8")
+xiang_loaded = module.load_nfo(xiang_nfo_path)
+xiang_engine = module.Engine(module.EngineConfig(roots=[DATA_PATH]),
+                             module.FileProvider(str(DATA_PATH / "empty_cache.json")))
+xiang_season, _ = xiang_engine.resolve_season_episode(xiang_loaded, "season")
+check("① 中文目录「第一季」解析为第 1 季（不再是未知 → 0）", xiang_season == "1", str(xiang_season))
+xiang_names = {path.name for _, path in
+               module.image_targets(xiang_loaded, {"poster"}, season=xiang_season)}
+check("② 落盘名是 season01-poster.jpg，绝不会出现 season00",
+      "season01-poster.jpg" in xiang_names and not any("season00" in n for n in xiang_names),
+      str(sorted(xiang_names)))
+
+# 季号确实解析不出来时：宁可不写季专用名，也不写 season00
+unknown = module.NfoFile(path=DATA_PATH / "dirid" / "未知季" / "season.nfo", media_type="season",
+                         tree=ET.ElementTree(ET.fromstring("<season><title>x</title></season>")))
+unknown_names = {path.name for _, path in module.image_targets(unknown, {"poster"})}
+check("③ 季号未知时跳过季专用文件名（只留季目录里的 poster.jpg）",
+      unknown_names == {"poster.jpg"}, str(sorted(unknown_names)))
+
+print()
+print("=" * 70)
 print("fanart.tv：光盘图 / 横幅图 / 透明艺术图 / 横版缩略图")
 print("=" * 70)
 _orig_urlopen = module.urllib.request.urlopen
