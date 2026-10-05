@@ -387,6 +387,71 @@ check("替换时旧演员与空节点一起被清掉，只留在线值",
       after_b.count("<actor>") == 2 and "旧演员" not in after_b
       and "<role>导演</role>" not in after_b, after_b)
 
+print()
+print("=" * 70)
+print("图片域名跟随宿主配置 + 下载失败自动重试")
+print("=" * 70)
+_orig_mp_setting = module.mp_setting
+try:
+    module.mp_setting = lambda name, default=None: (
+        {"TMDB_IMAGE_DOMAIN": "mirror.example.com/t/p"}.get(name, default))
+    check("image_host 跟随宿主的 TMDB_IMAGE_DOMAIN",
+          module.image_host() == "https://mirror.example.com/t/p/", module.image_host())
+    module.mp_setting = lambda name, default=None: (
+        {"TMDB_IMAGE_DOMAIN": "https://img.cdn.cn"}.get(name, default))
+    check("填了完整 URL 也能规整掉协议与多余斜杠",
+          module.image_host() == "https://img.cdn.cn/t/p/", module.image_host())
+    module.mp_setting = lambda name, default=None: (
+        {"TMDB_IMAGE_DOMAIN": "  "}.get(name, default))
+    check("宿主没配（空白值）时回落官方域名",
+          module.image_host() == "https://image.tmdb.org/t/p/", module.image_host())
+finally:
+    module.mp_setting = _orig_mp_setting
+check("恢复后默认仍是官方域名",
+      module.image_host() == "https://image.tmdb.org/t/p/")
+
+
+class _FakeResponse:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class FlakyOpener:
+    """前 fail_times 次抛异常，之后返回数据 —— 模拟 image.tmdb.org 抽风。"""
+
+    def __init__(self, fail_times, payload=b"image-bytes"):
+        self.fail_times = fail_times
+        self.payload = payload
+        self.calls = 0
+
+    def open(self, request, timeout=None):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise OSError("connection reset")
+        return _FakeResponse(self.payload)
+
+
+flaky = FlakyOpener(1)
+check("下载失败会自动重试并最终成功",
+      module.download_bytes("https://x/y.png", flaky, attempts=3) == b"image-bytes"
+      and flaky.calls == 2, f"calls={flaky.calls}")
+dead = FlakyOpener(99)
+check("重试全部失败才返回 None，并且尝试了设定的次数",
+      module.download_bytes("https://x/y.png", dead, attempts=2) is None and dead.calls == 2,
+      f"calls={dead.calls}")
+empty = FlakyOpener(0, payload=b"")
+check("响应为空也算失败（不会写出 0 字节图片）",
+      module.download_bytes("https://x/y.png", empty, attempts=1) is None)
+
 # 演员上限：0 表示不限制
 cast30 = {"cast": [{"name": f"演员{i}", "character": "路人"} for i in range(30)]}
 check("演员上限 0 = 全部写入", len(module.TmdbProvider("dummy", cast_limit=0)._actors(cast30)) == 30)
@@ -538,9 +603,10 @@ print("=" * 70)
 page = plugin.get_page()
 check("get_page 返回组件列表", isinstance(page, list) and len(page) >= 2)
 page_text = str(page)
-check("详情页主视图改成「本次修改了哪些文件」表格", "VDataTable" in page_text)
-check("表格列头为 文件 / 类型 / 字段变更 / 图片变更",
-      all(f"'title': '{h}'" in page_text for h in ("文件", "类型", "字段变更", "图片变更")))
+check("详情页主视图改成「本次修改了哪些文件」清单，且不再用渲染不出来的 VDataTable",
+      "VTextarea" in page_text and "VDataTable" not in page_text)
+check("清单按文件列出字段/图片改动", "▍" in page_text and "字段：" in page_text
+      and "星际穿越" in page_text)
 check("表格里给出了真实的媒体文件相对路径", "星际穿越" in page_text)
 check("详情页标出上次运行时间", "上次运行" in page_text)
 check("演练模式下措辞为「将要修改」", "将要修改" in page_text)

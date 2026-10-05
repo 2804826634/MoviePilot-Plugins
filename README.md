@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.4.1-blue)
+![version](https://img.shields.io/badge/version-1.4.2-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -271,20 +271,30 @@ NFO 里的 `<mpaa>` 标签存的其实是**影视分级**（`PG-13`、`R` 这类
 
 ## 界面：详情页看什么
 
-运行结束后，插件详情页的主视图是**「本次修改了哪些文件」表格**：
+运行结束后，插件详情页的主视图是**「本次修改了哪些文件」清单**（只读文本框，可滚动）：
 
-| 文件 | 类型 | 字段变更 | 图片变更 |
-| --- | --- | --- | --- |
-| 电影/星际穿越 (2014)/movie.nfo | 电影 | `plot · 补齐`、`genre · 替换` | `poster → poster.jpg · 补齐` |
-| 电影/沙丘 (2021)/沙丘 (2021).nfo | 电影 | `year · 替换` | — |
+```
+本次修改 78 个 NFO、175 张图片（按文件列出，共 29 项）
+
+▍电影/星际穿越 (2014)/movie.nfo　电影
+    字段：plot · 补齐、genre · 替换
+    图片：poster → poster.jpg · 补齐
+
+▍电影/沙丘 (2021)/沙丘 (2021).nfo　电影
+    字段：year · 替换
+```
 
 - **演练 / 只报告模式下也会列出清单**，措辞是「将要修改」，方便先体检再动手。
-- 表格只列**会写盘**的文件；被跳过的条目（NFO 锁定、保护字段、`gapfill` 只补缺失、图片仅补缺失等）
-  不会出现在表格里——完整原因见插件数据目录下的 `last_report.txt`（仍然照常生成）。
-- 顶部另有概要：本轮扫描了多少 NFO / 图片、实际改了多少。
+- 清单只列**会写盘**的文件；被跳过的条目（NFO 锁定、保护字段、`gapfill` 只补缺失、图片仅补缺失等）
+  不会出现——完整原因见插件数据目录下的 `last_report.txt`（仍然照常生成）。
+- 顶部另有概要：本轮扫描了多少 NFO / 图片、实际改了多少；有失败条目会附在清单末尾，
+  并单独给一条简短提示（不再铺满整个版面）。
+
+> 用纯文本而不是表格，是因为表格组件在插件详情页里**实测只渲染出分页条、表体一行都不显示**。
+> 能读到内容比排版好看重要 —— 如果你更希望用表格样式，可以告诉我。
 
 > 顺带一提：数据目录通常是 `<MoviePilot>/data/plugins/NfoGapFill/`，里面有 `last_report.txt`
-> （完整文本报告）与 `last_changes.json`（详情页表格用的结构化明细）。
+> （完整文本报告）与 `last_changes.json`（详情页清单用的结构化明细）。
 
 ---
 
@@ -315,7 +325,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 57 项断言（含图片补齐/别名/指纹幂等/#类型限定）
-python tests/_self_test_plugin.py   # 插件面 113 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离）
+python tests/_self_test_plugin.py   # 插件面 120 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
@@ -394,6 +404,9 @@ Jellyfin 读 `<director>` 时还会**按逗号拆分**多值字段，所以一�
   （`MediaInfo.poster_path` / `backdrop_path`），徽标 / 剧集缩略图 / 季海报拿不到。
 - **首轮图片有流量开销**：库里已有图片需要下载后才能判定是否一致；之后靠指纹清单零下载。
   库特别大时，可以先把「媒体库目录」填成某个子目录分批跑，或先设 `image_mode=missing` 只补空缺。
+- **图片下载依赖 `image.tmdb.org`**：国内直连经常超时。插件会自动沿用 MoviePilot 的
+  `PROXY_HOST`（代理）与 `TMDB_IMAGE_DOMAIN`（图片域名可换成镜像/反代），
+  下载失败还会**自动重试 3 次**；仍失败的条目会列在详情页的失败清单里，下次运行自动重试。
 - **写回后仍需让媒体服务器刷新**（MP 的「媒体库服务器刷新」插件，或在 Emby/Jellyfin 手动「刷新元数据」）。
 - **硬链接做种库**请确认 `PUID/PGID/UMASK` 对媒体目录可写，否则会静默失败。
 - 与官方「媒体库刮削」建议**二选一**：本插件已覆盖 NFO 与图片，同时开启两边可能互相覆盖。

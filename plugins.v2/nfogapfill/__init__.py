@@ -174,12 +174,11 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.4.1"
+PLUGIN_VERSION = "1.4.2"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
-IMG_BASE = "https://image.tmdb.org/t/p/original"      # 演员头像等原始尺寸直链
-IMG_HOST = "https://image.tmdb.org/t/p/"              # 图片地址前缀（后面跟尺寸 token）
+# 图片地址前缀由 image_host() 动态给出（跟随宿主的 TMDB_IMAGE_DOMAIN 设置）
 
 # 画质档位 → 各图片类型请求的 TMDB 尺寸。
 # 必须按类型分别取：TMDB 不同图片类型支持的尺寸集合不一样（logo 最大只到 w500，
@@ -279,6 +278,48 @@ def type_allowed(forced: Optional[str], media_type: str) -> bool:
     if forced == "tv":
         return media_type in ("tvshow", "season", "episodedetails")
     return True
+
+
+def image_host() -> str:
+    """TMDB 图片地址前缀，跟随 MoviePilot 的 TMDB_IMAGE_DOMAIN。
+
+    国内直连 image.tmdb.org 经常超时/被拦，MP 本身允许把域名换成镜像或反代
+    （设置项 TMDB_IMAGE_DOMAIN）。插件这里跟着走，用户就不用再填一遍。
+
+    两种写法都要兼容：只给域名（`image.tmdb.org`）→ 补上 `/t/p/`；
+    已经带了路径（`mirror.example.com/t/p`）→ 不重复拼。
+    """
+    domain = str(mp_setting("TMDB_IMAGE_DOMAIN", "") or "").strip() or "image.tmdb.org"
+    domain = re.sub(r"^https?://", "", domain).strip("/")
+    if "/t/p" in domain:
+        return f"https://{domain.rstrip('/')}/"
+    return f"https://{domain}/t/p/"
+
+
+def download_bytes(url: str, opener: Any = None, attempts: int = 3) -> Optional[bytes]:
+    """下载二进制内容，失败自动重试。
+
+    image.tmdb.org 在部分地区经常抽风，一次失败就把错误写到面板上会制造大量「假失败」。
+    这里做多次尝试 + 递增退避，只有全部失败才返回 None 并记录一条告警。
+    """
+    last_error = "响应为空"
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(url, headers={"User-Agent": UA})
+        try:
+            if opener is not None:
+                with opener.open(request, timeout=TIMEOUT) as response:
+                    data = response.read()
+            else:
+                with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                    data = response.read()
+            if data:
+                return data
+        except Exception as exc:
+            last_error = str(exc)
+        if attempt < attempts:
+            time.sleep(0.6 * attempt)
+    logger.warning(f"图片下载失败（已重试 {attempts} 次）：{url}（{last_error}）")
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -817,6 +858,8 @@ class TmdbProvider:
         self.cert_country = (cert_country or "US").upper()
         self.cast_limit = cast_limit
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
+        # 图片域名跟随宿主配置（国内直连 image.tmdb.org 经常超时，MP 允许换镜像）
+        self.img_host = image_host()
         handlers = []
         if proxy:
             handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
@@ -881,12 +924,11 @@ class TmdbProvider:
         # cast_limit <= 0 表示不限制（全部写入）
         people = [
             ACTOR_SEP.join([(a.get("name") or "").strip(), (a.get("character") or "").strip(),
-                            (IMG_BASE + a["profile_path"]) if a.get("profile_path") else ""])
+                            (self.img_host + "original" + a["profile_path"]) if a.get("profile_path") else ""])
             for a in (credits or {}).get("cast") or []
             if (a.get("name") or "").strip()
         ]
         return people if self.cast_limit <= 0 else people[: self.cast_limit]
-
     def fetch_movie(self, tmdb_id: str) -> Dict[str, List[str]]:
         data = self._get(f"/movie/{tmdb_id}", append_to_response="credits,release_dates")
         if not data:
@@ -1009,17 +1051,11 @@ class TmdbProvider:
         for kind in kinds:
             best = pick_best_image(data.get(IMG_API_KEYS.get(kind, "")) or [], self.language)
             if best:
-                out[kind] = f"{IMG_HOST}{self.image_size(kind)}{best['file_path']}"
+                out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
         return out
 
     def read_image(self, url: str) -> Optional[bytes]:
-        request = urllib.request.Request(url, headers={"User-Agent": UA})
-        try:
-            with self.opener.open(request, timeout=TIMEOUT) as response:
-                return response.read()
-        except Exception as exc:
-            logger.warning(f"图片下载失败：{url}（{exc}）")
-            return None
+        return download_bytes(url, self.opener)
 
 
 class HostProvider:
@@ -1033,6 +1069,7 @@ class HostProvider:
         self._opener_obj = None
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
         self.cast_limit = cast_limit
+        self.img_host = image_host()
 
     def _media_chain(self):
         if self._failed:
@@ -1155,7 +1192,7 @@ class HostProvider:
                 value = str(getattr(info, attr, "") or "").strip()
                 if value:
                     out[kind] = (value if value.startswith("http")
-                                 else IMG_HOST + image_size_for(self.image_quality, kind) + value)
+                                 else self.img_host + image_size_for(self.image_quality, kind) + value)
                     break
         return out
 
@@ -1174,13 +1211,7 @@ class HostProvider:
         return self._opener_obj
 
     def read_image(self, url: str) -> Optional[bytes]:
-        request = urllib.request.Request(url, headers={"User-Agent": UA})
-        try:
-            with self._opener().open(request, timeout=TIMEOUT) as response:
-                return response.read()
-        except Exception as exc:
-            logger.warning(f"图片下载失败：{url}（{exc}）")
-            return None
+        return download_bytes(url, self._opener())
 
 
 class FileProvider:
@@ -2190,23 +2221,39 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
         if not data:
             return self.__page_fallback()
 
-        rows = []
-        for row in data.get("rows") or []:
-            kind = row.get("kind") or ""
-            rows.append({
-                "file": row.get("file", ""),
-                "kind": self.KIND_CN.get(kind, kind),
-                "fields": row.get("fields", "—"),
-                "images": row.get("images", "—"),
-            })
-
+        rows = data.get("rows") or []
         changed = int(data.get("changed_files") or 0)
         images_written = int(data.get("images_written") or 0)
         scanned = int(data.get("scanned") or 0)
         images_scanned = int(data.get("images_scanned") or 0)
+        errors = [str(item) for item in (data.get("errors") or [])]
         dry = bool(data.get("dry_run"))
         preview = dry or data.get("mode") == "report"
         verb = "将要修改" if preview else "本次修改"
+
+        # 明细用纯文本：VDataTable 在本环境实测只渲染出分页条、表体一行都不显示
+        # （分页条能报出「1-10 of 29」，说明数据到了，是渲染问题），
+        # 而只读文本域是验证过稳定可用的 —— 先保证「能读到内容」。
+        lines: List[str] = []
+        if rows:
+            lines.append(f"{verb} {changed} 个 NFO、{images_written} 张图片"
+                         f"（按文件列出，共 {len(rows)} 项）")
+            for row in rows:
+                kind = row.get("kind") or ""
+                kind_cn = self.KIND_CN.get(kind, kind)
+                lines.append("")
+                lines.append(f"▍{row.get('file', '')}" + (f"　{kind_cn}" if kind_cn else ""))
+                lines.append(f"    字段：{row.get('fields') or '—'}")
+                images = row.get("images") or "—"
+                if images != "—":
+                    lines.append(f"    图片：{images}")
+        else:
+            lines.append(f"本次没有需要修改的内容"
+                         f"（已扫描 {scanned} 个 NFO / {images_scanned} 张图片）。")
+        if errors:
+            lines.append("")
+            lines.append(f"—— 另有 {len(errors)} 条无法比对 / 失败 ——")
+            lines.extend(errors)
 
         blocks: List[dict] = [
             {"component": "VRow", "content": [
@@ -2230,40 +2277,32 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                  f"本次没有需要修改的内容"
                                  f"（扫描 {scanned} 个 NFO / {images_scanned} 张图片，全部已是最新）")}}]},
             ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VTextarea", "props": {
+                        "model": "changes_text",
+                        "modelValue": "\n".join(lines),
+                        "rows": 20, "readonly": True, "no-resize": True,
+                        "label": (f"{verb}的文件（共 {len(rows)} 项，可滚动查看）" if rows
+                                  else "本次没有需要修改的内容")}}]},
+            ]},
         ]
 
-        if rows:
-            blocks.append({"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12}, "content": [
-                    {"component": "VDataTable", "props": {
-                        "headers": [
-                            {"title": "文件", "key": "file"},
-                            {"title": "类型", "key": "kind"},
-                            {"title": "字段变更", "key": "fields"},
-                            {"title": "图片变更", "key": "images"},
-                        ],
-                        "items": rows,
-                        "density": "compact",
-                        "hover": True,
-                    }}]},
-            ]})
-
-        errors = data.get("errors") or []
         if errors:
             blocks.append({"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12}, "content": [
                     {"component": "VAlert", "props": {
                         "type": "warning", "variant": "tonal",
-                        "text": f"另有 {len(errors)} 条无法比对 / 失败："
-                                + "；".join(str(item) for item in errors[:5])}}]},
+                        "text": f"有 {len(errors)} 条无法比对 / 失败，明细已附在上面清单末尾："
+                                + errors[0][:90]}}]},
             ]})
 
         blocks.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12}, "content": [
                 {"component": "VAlert", "props": {
                     "type": "info", "variant": "tonal",
-                    "text": "表格只列「会写盘」的文件；被跳过的条目（NFO 锁定、保护字段、"
-                            "gapfill 只补缺失、图片仅补缺失等）不会出现在这里，"
+                    "text": "清单只列「会写盘」的文件；被跳过的条目（NFO 锁定、保护字段、"
+                            "gapfill 只补缺失、图片仅补缺失等）不在此列，"
                             "完整原因见插件数据目录下的 last_report.txt。"}}]},
         ]})
         return blocks
