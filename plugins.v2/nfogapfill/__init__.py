@@ -61,18 +61,21 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
     image_mode = off      完全不处理图片（CLI 默认）
     image_mode = missing  只补缺失图片，不动已有图
     image_mode = sync     缺失补齐 + 不一致替换 + 一致跳过（插件默认）
-    支持的图片类型（共 4 类，另含随「海报」一起处理的季海报）：
-        海报 poster      电影、剧集目录 poster.jpg
-        背景图 backdrop  电影、剧集目录 backdrop.jpg，并额外写一份 fanart.jpg（Kodi/Emby 认这个名）
-        徽标 logo        电影、剧集目录 logo.png
-        剧集缩略图 thumb 单集剧照，写成与该集视频同名的 .jpg（要求该集存在 NFO）
-        季海报           跟随「海报」：季目录 poster.jpg，同时在剧集根目录写 seasonNN-poster.jpg
-    不支持的类型（TMDB 没有这些素材，只有 fanart.tv 提供，需要另申请 Key）：
-        banner / clearart / discart / landscape / characterart
-        也就是说本插件负责「把已有这几类补全并纠错」，不是全画集刮削，
-        需要完整画集可以另叠一个 fanart.tv 类工具，两者不冲突。
+    支持的图片类型（共 8 类，另含随「海报」一起处理的季海报）：
+        海报 poster        电影、剧集目录 poster.jpg                ← TMDB
+        背景图 backdrop    电影、剧集目录 backdrop.jpg + fanart.jpg  ← TMDB
+        徽标 logo          电影、剧集目录 logo.png                  ← TMDB
+        剧集缩略图 thumb   单集剧照，写成与该集视频同名的 .jpg        ← TMDB
+        横幅图 banner      电影、剧集、季目录 banner.jpg             ← fanart.tv
+        光盘图 disc        电影、剧集目录 disc.png                  ← fanart.tv
+        透明艺术图 clearart 电影、剧集目录 clearart.png             ← fanart.tv
+        横版缩略图 landscape 电影、剧集、季目录 landscape.jpg        ← fanart.tv
+        季海报             跟随「海报」：季目录 poster.jpg，同时在剧集根目录写 seasonNN-poster.jpg
+    fanart.tv 的 API Key 自动沿用 MoviePilot 的 FANART_API_KEY（MP 自带默认值），
+    语言偏好跟随 MP 的 FANART_LANG（默认 zh,en）。键名映射与 MP 的 FanartModule 一致。
     一致的判定靠 image_manifest.json 指纹清单：记录「这张图来自哪个 URL、内容 sha256」，
     因此稳态下零下载即可判定「相同」。首次运行需要下载比对以建立指纹（有流量开销）。
+    characterart（人物图）仍不支持 —— fanart.tv 有但 MP 的画集清单里没有它，需要时再说。
 
 ────────────────────────────────────────────────────────────────────────
 五、与 MoviePilot 的配置联动（全部自动继承，不用手填）
@@ -174,7 +177,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.4.3"
+PLUGIN_VERSION = "1.5.0"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
@@ -193,8 +196,12 @@ IMG_SIZES: Dict[str, Dict[str, str]] = {
 IMG_API_KEYS: Dict[str, str] = {"poster": "posters", "backdrop": "backdrops",
                                 "logo": "logos", "thumb": "stills"}
 
-IMAGE_KINDS: Tuple[str, ...] = ("poster", "backdrop", "logo", "thumb")
-IMAGE_KIND_CN = {"poster": "海报", "backdrop": "背景图", "logo": "徽标", "thumb": "剧集缩略图"}
+IMAGE_KINDS: Tuple[str, ...] = ("poster", "backdrop", "logo", "thumb",
+                                "banner", "disc", "clearart", "landscape")
+IMAGE_KIND_CN = {
+    "poster": "海报", "backdrop": "背景图", "logo": "徽标", "thumb": "剧集缩略图",
+    "banner": "横幅图", "disc": "光盘图", "clearart": "透明艺术图", "landscape": "横版缩略图",
+}
 
 IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
 
@@ -320,6 +327,88 @@ def download_bytes(url: str, opener: Any = None, attempts: int = 3) -> Optional[
             time.sleep(0.6 * attempt)
     logger.warning(f"图片下载失败（已重试 {attempts} 次）：{url}（{last_error}）")
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# fanart.tv：光盘图 / 横幅图 / 透明艺术图 / 横版缩略图只有这里有
+# 映射关系照抄 MoviePilot 的 FanartModule._FANART_NAME_MAP，命名保持一致。
+# ══════════════════════════════════════════════════════════════════════
+FANART_KEYS: Dict[str, Tuple[str, ...]] = {
+    "banner": ("moviebanner", "tvbanner"),
+    "disc": ("moviedisc",),
+    "clearart": ("hdmovieclearart", "movieart", "hdclearart"),
+    "landscape": ("moviethumb", "tvthumb"),
+}
+
+
+def fanart_api_key() -> str:
+    """fanart.tv 的 API Key，自动沿用 MoviePilot 的 FANART_API_KEY（MP 自带默认值）。"""
+    return str(mp_setting("FANART_API_KEY", "") or "").strip()
+
+
+def fanart_lang_order() -> List[str]:
+    """语言偏好，跟随 MoviePilot 的 FANART_LANG（默认 zh,en）。"""
+    raw = str(mp_setting("FANART_LANG", "") or "").strip() or "zh,en"
+    return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+
+def pick_fanart_image(entries: List[dict]) -> Optional[str]:
+    """从 fanart.tv 的图片数组里挑一张：先按语言偏好（FANART_LANG），再按社区点赞数。"""
+    valid = [item for item in entries or [] if item.get("url")]
+    if not valid:
+        return None
+    order = fanart_lang_order()
+
+    def rank(item: dict) -> Tuple[int, int]:
+        lang = str(item.get("lang") or "").lower()
+        try:
+            likes = int(item.get("likes") or 0)
+        except (TypeError, ValueError):
+            likes = 0
+        try:
+            pos = order.index(lang)
+        except ValueError:
+            pos = len(order)
+        return (pos, -likes)
+
+    return min(valid, key=rank)["url"]
+
+
+def fanart_image_urls(kinds: set, tmdb_id: str, tvdb_id: str,
+                      api_key: str) -> Dict[str, str]:
+    """从 fanart.tv 取 TMDB 拿不到的那几类图，返回 {图片类型: 地址}。
+
+    电影按 tmdbid 查，剧集按 thetvdb id 查（fanart.tv 的剧集接口只认 tvdb id）。
+    没有 Key、查不到、或这几类一个都不需要时返回空 dict，调用方自行兜底。
+    """
+    wanted = {kind for kind in kinds or () if kind in FANART_KEYS}
+    if not wanted or not api_key:
+        return {}
+    if any(kind in FANART_KEYS for kind in wanted) and not (tmdb_id or tvdb_id):
+        return {}
+    # 剧集接口按 thetvdb id 查；电影按 tmdbid 查
+    tv_mode = bool(tvdb_id) or not tmdb_id
+    query = tvdb_id or tmdb_id
+    segment = "tv" if tv_mode else "movies"
+    url = f"https://webservice.fanart.tv/v3/{segment}/{query}?api_key={api_key}"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": UA,
+                                                       "Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            data = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        logger.warning(f"fanart.tv 查询失败（{segment}/{query}）：{exc}")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for kind in sorted(wanted):
+        for key in FANART_KEYS[kind]:
+            best = pick_fanart_image(data.get(key) or [])
+            if best:
+                out[kind] = best
+                break
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -701,16 +790,26 @@ IMAGE_SPECS: Dict[str, List[ImageSpec]] = {
         ImageSpec("backdrop", "backdrop.jpg"),
         ImageSpec("backdrop", "fanart.jpg", alias=True),        # Kodi / Emby 认 fanart
         ImageSpec("logo", "logo.png"),
+        ImageSpec("banner", "banner.jpg"),
+        ImageSpec("disc", "disc.png"),
+        ImageSpec("clearart", "clearart.png"),
+        ImageSpec("landscape", "landscape.jpg"),
     ],
     "tvshow": [
         ImageSpec("poster", "poster.jpg"),
         ImageSpec("backdrop", "backdrop.jpg"),
         ImageSpec("backdrop", "fanart.jpg", alias=True),
         ImageSpec("logo", "logo.png"),
+        ImageSpec("banner", "banner.jpg"),
+        ImageSpec("disc", "disc.png"),
+        ImageSpec("clearart", "clearart.png"),
+        ImageSpec("landscape", "landscape.jpg"),
     ],
     "season": [
         ImageSpec("poster", "poster.jpg"),
         ImageSpec("poster", "season{season:0>2}-poster.jpg", alias=True, in_parent=True),
+        ImageSpec("banner", "banner.jpg"),
+        ImageSpec("landscape", "landscape.jpg"),
     ],
     "episodedetails": [
         ImageSpec("thumb", "{stem}.jpg"),
@@ -891,6 +990,8 @@ class TmdbProvider:
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
         # 图片域名跟随宿主配置（国内直连 image.tmdb.org 经常超时，MP 允许换镜像）
         self.img_host = image_host()
+        # 光盘图 / 横幅图 / 透明艺术图 / 横版缩略图来自 fanart.tv，Key 自动沿用宿主配置
+        self.fanart_key = fanart_api_key()
         handlers = []
         if proxy:
             handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
@@ -1083,6 +1184,25 @@ class TmdbProvider:
             best = pick_best_image(data.get(IMG_API_KEYS.get(kind, "")) or [], self.language)
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
+        # TMDB 只有海报 / 背景图 / 徽标 / 剧照；光盘图、横幅图、透明艺术图、横版缩略图
+        # 只有 fanart.tv 提供，需要额外查一次（电影按 tmdbid，剧集按 thetvdb id）
+        missing = {kind for kind in kinds if kind in FANART_KEYS and kind not in out}
+        if missing and not self.fanart_key:
+            if not getattr(self, "_warned_fanart_key", False):
+                self._warned_fanart_key = True
+                logger.warning("要处理 " + "、".join(
+                    f"{k}（{IMAGE_KIND_CN.get(k, k)}）" for k in sorted(missing))
+                    + "，但拿不到 fanart.tv 的 API Key（会自动沿用 MoviePilot 的"
+                      " FANART_API_KEY，MP 自带默认值）—— 这几类本轮跳过")
+            missing = set()
+        if missing:
+            tvdb_id = ""
+            if media_type != "movie":
+                external = self._get(f"/tv/{tmdb_id}/external_ids") or {}
+                tvdb_id = str(external.get("tvdb_id") or "").strip()
+            for kind, url in fanart_image_urls(missing, tmdb_id, tvdb_id,
+                                               self.fanart_key).items():
+                out.setdefault(kind, url)
         return out
 
     def read_image(self, url: str) -> Optional[bytes]:
@@ -1213,6 +1333,12 @@ class HostProvider:
         """
         if media_type not in ("movie", "tvshow"):
             return {}
+        fanart_wanted = sorted(k for k in kinds or () if k in FANART_KEYS)
+        if fanart_wanted and not getattr(self, "_warned_fanart", False):
+            self._warned_fanart = True
+            logger.warning("宿主刮削通道拿不到 " + "、".join(
+                f"{k}（{IMAGE_KIND_CN.get(k, k)}）" for k in fanart_wanted)
+                + " —— 这几类来自 fanart.tv，需要配置 TMDB API Key 走直连")
         info = self._recognize(tmdb_id, media_type == "tvshow")
         if info is None:
             return {}
@@ -2067,6 +2193,10 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                         {"title": "背景图（backdrop.jpg + fanart.jpg）", "value": "backdrop"},
                                         {"title": "徽标（logo.png）", "value": "logo"},
                                         {"title": "剧集缩略图（单集剧照 → 与视频同名的 .jpg）", "value": "thumb"},
+                                        {"title": "横幅图（banner.jpg）", "value": "banner"},
+                                        {"title": "光盘图（disc.png）", "value": "disc"},
+                                        {"title": "透明艺术图（clearart.png）", "value": "clearart"},
+                                        {"title": "横版缩略图（landscape.jpg）", "value": "landscape"},
                                     ]}}]},
                         ],
                     },
@@ -2075,11 +2205,14 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "勾选的类型会写成什么（命名与 Kodi / Jellyfin 约定一致）："
-                                         "① 海报 → 电影/剧集目录 poster.jpg；"
+                                 "text": "勾选的类型会写成什么（命名与 MP / Kodi / Jellyfin 约定一致）："
+                                         "① 海报 → poster.jpg；"
                                          "② 背景图 → backdrop.jpg，并额外写一份 fanart.jpg（Kodi/Emby 认这个名）；"
                                          "③ 徽标 → logo.png；"
-                                         "④ 剧集缩略图 → 单集剧照，写成与该集视频同名的 .jpg（要求该集存在 NFO）。"
+                                         "④ 剧集缩略图 → 单集剧照，写成与该集视频同名的 .jpg（要求该集存在 NFO）；"
+                                         "⑤ 横幅图 → banner.jpg；⑥ 光盘图 → disc.png；"
+                                         "⑦ 透明艺术图 → clearart.png；⑧ 横版缩略图 → landscape.jpg。"
+                                         "季目录也会写 banner.jpg 与 landscape.jpg（与剧集根目录同图）。"
                                          "季海报不单独成项，跟随「海报」一起处理：写季目录 poster.jpg，"
                                          "同时在剧集根目录同步一份 seasonNN-poster.jpg。"
                                          "全部不选 = 不处理任何图片（等于关掉图片处理，不会偷偷回退成全选）。"
@@ -2093,13 +2226,14 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "component": "VRow",
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
-                                 "text": "本插件只做上面这 4 类 + 季海报。TMDB 本身只提供"
-                                         "海报 / 背景图 / 徽标 / 剧照（still）这几种素材，"
-                                         "所以 banner、clearart、discart、landscape、characterart "
-                                         "这些画集**无法支持** —— 它们只有 fanart.tv 提供，需要另外申请该站 API Key。"
-                                         "换句话说：本插件负责「把已有这几类补全并纠错」，不是全画集刮削；"
-                                         "需要完整画集可以再叠加一个 fanart.tv 类工具，两者不冲突。"}]},
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "数据来源分两路：海报 / 背景图 / 徽标 / 剧照来自 TMDB；"
+                                         "光盘图 / 横幅图 / 透明艺术图 / 横版缩略图 **只有 fanart.tv 有**，"
+                                         "其 API Key 会自动沿用 MoviePilot 里配置的 FANART_API_KEY"
+                                         "（MP 自带默认值，所以一般什么都不用填），"
+                                         "语言偏好也跟随 MP 的 FANART_LANG。"
+                                         "这几类需要 TMDB API Key 走直连（宿主刮削通道拿不到）。"
+                                         "注意 fanart.tv 是社区共建，冷门影片这几类可能就是没有 —— 那不是故障。"}]},
                         ],
                     },
                     {
@@ -2329,6 +2463,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "text": (f"{verb} {changed} 个 NFO、{images_written} 张图片"
                                  f"（本轮共扫描 {scanned} 个 NFO / {images_scanned} 张图片，"
                                  f"其余均与在线一致或被规则跳过）"
+                                 + (f"，另有 {len(errors)} 条无法比对 / 失败"
+                                    f"（明细见下方清单末尾）" if errors else "")
                                  if rows else
                                  f"本次没有需要修改的内容"
                                  f"（扫描 {scanned} 个 NFO / {images_scanned} 张图片，全部已是最新）")}}]},
@@ -2344,15 +2480,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             ]},
         ]
 
-        if errors:
-            blocks.append({"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12}, "content": [
-                    {"component": "VAlert", "props": {
-                        "type": "warning", "variant": "tonal",
-                        "text": f"有 {len(errors)} 条无法比对 / 失败，明细已附在上面清单末尾："
-                                + errors[0][:90]}}]},
-            ]})
-
+        # 失败明细已经附在上面清单的末尾，这里不再重复贴 ——
+        # 之前在这里截断 90 个字符，会出现「图片下载失败（po」这种半句话
         blocks.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12}, "content": [
                 {"component": "VAlert", "props": {

@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.4.3-blue)
+![version](https://img.shields.io/badge/version-1.5.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -73,9 +73,10 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 
 ## 图片补全
 
-### 支持的全部类型（就这 4 类 + 季海报）
+### 支持的全部类型（8 类 + 季海报）
 
-落盘命名遵循 **MP / Kodi / Jellyfin 三者共同认可**的约定（对照 MP `app/chain/media.py` 的 `IMAGE_ALIASES` 与季目录命名规则实现）：
+落盘命名遵循 **MP / Kodi / Jellyfin 三者共同认可**的约定（对照 MP `app/chain/media.py` 的
+`IMAGE_ALIASES`、`ScrapingMetadata` 与季目录命名规则实现）：
 
 | 配置里的选项 | 落盘文件 | 适用 | 数据来源 |
 | --- | --- | --- | --- |
@@ -83,15 +84,25 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 | 背景图（backdrop） | `backdrop.jpg` **+** `fanart.jpg` | 电影、剧集目录 | TMDB `backdrops` |
 | 徽标（logo） | `logo.png` | 电影、剧集目录 | TMDB `logos` |
 | 剧集缩略图（thumb） | `<视频文件名>.jpg` | 单集（需该集有 NFO） | TMDB `stills` |
+| 横幅图（banner） | `banner.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviebanner` / `tvbanner` |
+| 光盘图（disc） | `disc.png` | 电影、剧集目录 | **fanart.tv** `moviedisc` |
+| 透明艺术图（clearart） | `clearart.png` | 电影、剧集目录 | **fanart.tv** `hdmovieclearart` 等 |
+| 横版缩略图（landscape） | `landscape.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviethumb` / `tvthumb` |
 | 季海报 | `<季目录>/poster.jpg` **+** `<剧集根目录>/seasonNN-poster.jpg` | 季 | TMDB `posters`（**跟随「海报」一起处理，不单独成项**） |
 
-### 不支持的类型（以及为什么）
+### fanart.tv 那几类怎么配置
 
-`banner`、`clearart`、`discart`、`landscape`、`characterart` 这类画集 **TMDB 并不提供**——
-它只有 海报 / 背景图 / 徽标 / 剧照 四种素材，上面那几类只有 **fanart.tv** 才有，需要另外申请该站 API Key。
+光盘图 / 横幅图 / 透明艺术图 / 横版缩略图 **只有 fanart.tv 有**（TMDB 只提供 海报 / 背景图 / 徽标 / 剧照）。
+本插件会**自动沿用 MoviePilot 里配置的 `FANART_API_KEY`**（MP 自带默认值，所以一般什么都不用填），
+语言偏好也跟随 MP 的 `FANART_LANG`（默认 `zh,en`）—— 优先要中文版，其次英文，再按社区点赞数。
+键名映射与 MP 自己的 `FanartModule._FANART_NAME_MAP` 一致。
 
-所以本插件的定位是：**把你库里已有这几类补全并纠错**，不是「全画集刮削」。
-需要完整画集的话，可以再叠加一个 fanart.tv 类工具，两者不冲突。
+两点注意：
+
+- 这几类**需要 TMDB API Key 走直连**（宿主刮削通道拿不到，插件会在日志里提醒）；
+  剧集按 **thetvdb id** 查询 fanart.tv（插件会自动通过 TMDB 换算）。
+- fanart.tv 是社区共建，**冷门影片这几类可能就是没有** —— 那不是故障。
+  另外尚未支持 `characterart`（人物图），需要的话再说。
 
 三种图片处理档位（`image_mode`）：
 
@@ -318,6 +329,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 ```
 
 > 不加 `--fix` 时等价于「只报告」；图片相关的开关是 `--image-mode` / `--image-kinds` / `--image-quality` / `--image-manifest`。
+> 注意：CLI 里 `--source file`（离线演练）给不了光盘图 / 横幅图这类 fanart.tv 的图 —— 它们只在线上；`--source tmdb` 或插件里则正常。
 
 ## 自测
 
@@ -325,7 +337,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 57 项断言（含图片补齐/别名/指纹幂等/#类型限定）
-python tests/_self_test_plugin.py   # 插件面 126 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理）
+python tests/_self_test_plugin.py   # 插件面 136 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
