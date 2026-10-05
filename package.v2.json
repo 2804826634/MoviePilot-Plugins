@@ -1,0 +1,16 @@
+{
+  "NfoGapFill": {
+    "name": "NFO 差异比对与补齐",
+    "description": "比对本地 NFO 与在线元数据：缺失补齐、不一致替换、一致跳过；支持字段保护与 NFO 锁定。",
+    "labels": "工具",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/peter_chen/MoviePilot-Plugins/main/icons/nfogapfill.png",
+    "author": "peter_chen",
+    "level": 1,
+    "v3": false,
+    "release": true,
+    "history": {
+      "v1.0.0": "首个版本：本地 NFO 与在线元数据差异比对，按需补齐/替换，尊重 lockdata/lockedfields，支持自定义保护字段、演练模式与写入前备份"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<movie>
+  <title>星际穿越</title>
+  <originaltitle>Interstellar</originaltitle>
+  <plot></plot>
+  <year>2014</year>
+  <uniqueid type="tmdb" default="true">157336</uniqueid>
+  <tmdbid>157336</tmdbid>
+  <genre>科幻</genre>
+  <director>Christopher Nolan</director>
+</movie>

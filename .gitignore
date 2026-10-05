@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# 测试 / 运行时产物
+tests/_fixture/_run/
+tests/_fixture/**/.nfo-backup/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 本工具在媒体库根目录生成的东西
+.nfo-backup/
+*.report.txt
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
