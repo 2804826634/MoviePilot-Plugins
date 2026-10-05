@@ -178,11 +178,13 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.6.2"
+PLUGIN_VERSION = "1.6.3"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
 RATE_GAP_MIN = 0.08      # 并发时的最快间隔（≈12 请求/秒，仍远低于 TMDB 的 50/秒）
+TMDB_RETRIES = 3         # 网络类失败的重试次数（国内直连 TMDB 常 SSL 握手超时）
+TMDB_RETRY_WAIT = 0.8    # 重试退避基数（秒），第 n 次等 n 倍
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
 
 
@@ -851,21 +853,36 @@ IMAGE_SPECS: Dict[str, List[ImageSpec]] = {
 }
 
 
-def image_targets(nfo: NfoFile, kinds: set) -> List[Tuple[ImageSpec, Path]]:
-    """算出这个 NFO 对应的全部图片落盘路径。"""
+def image_targets(nfo: NfoFile, kinds: set,
+                  season: Optional[str] = None) -> List[Tuple[ImageSpec, Path]]:
+    """算出这个 NFO 对应的全部图片落盘路径。
+
+    `season` 由引擎用 `resolve_season_episode()`（三级兜底）解析后传进来。
+    以前这里自己解析、失败就**默认 0** —— 于是「解析不出季号的季 NFO」会写出
+    `season00-poster.jpg`（用户就遇到过：剧目根本没有第 0 季）。
+    更糟的是取图 URL 用的是另一套解析、可能算成第 1 季 ——
+    结果是「拿第 1 季的图、写成 season00 的名字」。
+
+    因此：**解析不出季号时直接跳过季专用文件名**（宁可不写，也不写错季）。
+    """
     specs = IMAGE_SPECS.get(nfo.media_type, [])
     if not specs:
         return []
-    season_text = norm_text(nfo.root.findtext("season")) or ""
-    try:
-        season_num = int(re.sub(r"\D", "", season_text) or 0)
-    except ValueError:
-        season_num = 0
+    if season is None:
+        season = norm_text(nfo.root.findtext("season"))
+    season_num: Optional[int] = None
+    if season is not None and str(season).strip():
+        digits = re.sub(r"\D", "", str(season))
+        if digits:
+            season_num = int(digits)
     out: List[Tuple[ImageSpec, Path]] = []
     for spec in specs:
         if spec.kind not in kinds:
             continue
-        name = spec.name.format(stem=nfo.path.stem, season=season_num)
+        if "{season" in spec.name and season_num is None:
+            continue            # 季号未知 → 不写 seasonNN-xxx，避免写出 season00 这种错名
+        name = spec.name.format(stem=nfo.path.stem,
+                               season=season_num if season_num is not None else 0)
         base = nfo.path.parent.parent if spec.in_parent else nfo.path.parent
         out.append((spec, base / name))
     return out
@@ -1037,28 +1054,46 @@ class TmdbProvider:
         self.limiter = RateLimiter(tmdb_gap(concurrency))
         self._lock = threading.Lock()
         self.calls = 0
+        self.retries = 0      # 自动重试次数（给运行报告用）
 
     def _get(self, path: str, **params) -> Optional[dict]:
-        self.limiter.wait()
+        """请求 TMDB，**网络类失败会自动重试**。
+
+        国内直连 api.themoviedb.org 很常见 `SSL handshake timed out` / 连接被重置 ——
+        以前一次失败就放弃，于是条目被记成「取不到在线数据，保持原样」。
+        现在对这类瞬时错误重试 TMDB_RETRIES 次（递增退避），
+        但 404（资源不存在）不重试，401（Key 无效）直接抛错。
+        """
         params.update({"api_key": self.api_key, "language": self.language})
         url = f"https://api.themoviedb.org/3{path}?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with self._lock:
-            self.calls += 1
-        try:
-            with self.opener.open(req, timeout=TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 401:
-                raise RuntimeError("TMDB 返回 401：API Key 无效或未激活")
-            if exc.code == 429:
-                time.sleep(2)
-            if exc.code != 404:
-                logger.warning(f"TMDB HTTP {exc.code}：{path}")
-            return None
-        except Exception as exc:
-            logger.warning(f"TMDB 请求失败：{path}（{exc}）")
-            return None
+        last_error = ""
+        for attempt in range(1, TMDB_RETRIES + 1):
+            self.limiter.wait()          # 每次尝试都走限速，重试不会突破速率上限
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with self._lock:
+                self.calls += 1
+            wait = 0.0
+            try:
+                with self.opener.open(req, timeout=TIMEOUT) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401:
+                    raise RuntimeError("TMDB 返回 401：API Key 无效或未激活")
+                if exc.code in (404, 422):
+                    return None                       # 资源不存在，重试没有意义
+                last_error = f"HTTP {exc.code}"
+                wait = (5.0 if exc.code == 429 else TMDB_RETRY_WAIT) * attempt
+            except Exception as exc:
+                last_error = str(exc)
+                wait = TMDB_RETRY_WAIT * attempt
+            if attempt < TMDB_RETRIES:
+                with self._lock:
+                    self.retries += 1
+                logger.debug(f"TMDB 请求失败将重试（第 {attempt}/{TMDB_RETRIES - 1} 次）："
+                             f"{path}（{last_error}）")
+                time.sleep(wait)
+        logger.warning(f"TMDB 请求失败（已自动重试 {TMDB_RETRIES - 1} 次）：{path}（{last_error}）")
+        return None
 
     @staticmethod
     def _cert(data: dict, country: str) -> str:
@@ -1534,6 +1569,7 @@ class Report:
     skipped_locked: int = 0
     skipped_type: int = 0         # 所在目录被 #类型 限定时跳过的条数
     scrubbed: int = 0             # 清理掉的「对象字面量」历史脏值节点数
+    retried: int = 0              # 网络失败后自动重试的次数
     unresolved: int = 0           # 拿不到在线数据
     failed: int = 0
     counts: Dict[str, int] = field(default_factory=dict)    # 差异判定统计
@@ -1582,6 +1618,9 @@ class Report:
         if self.scrubbed:
             lines.append(f"清理历史脏值 {self.scrubbed} 处"
                          f"（早期版本把结构化对象写成 Python 字面量留下的）")
+        if self.retried:
+            lines.append(f"网络抖动自动重试 {self.retried} 次"
+                         f"（重试后仍失败的条目会记在下方）")
         if self.counts:
             lines.append("差异判定：" + "｜".join(f"{k} {v}" for k, v in self.counts.items()))
         if self.applied:
@@ -1668,6 +1707,28 @@ def title_year_from_dir(name: str) -> Tuple[Optional[str], Optional[str]]:
     return title, year
 
 
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def cn_number(text: str) -> Optional[int]:
+    """把常见中文数字转成整数（一~九十九）：「第一季」→ 1、「第十二季」→ 12。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw == "十":
+        return 10
+    if "十" in raw:
+        head, _, tail = raw.partition("十")
+        if head and head not in _CN_DIGITS:
+            return None
+        if tail and tail not in _CN_DIGITS:
+            return None
+        tens = _CN_DIGITS.get(head, 1) if head else 1
+        return tens * 10 + _CN_DIGITS.get(tail, 0)
+    return _CN_DIGITS.get(raw)
+
+
 def season_from_dir(name: str) -> Optional[str]:
     """从目录名里取季号：「Season 01」/「S01」/「第 1 季」/「第一季」→ "1"。
 
@@ -1693,6 +1754,12 @@ def season_from_dir(name: str) -> Optional[str]:
             number = int(match.group(1))
             if 0 <= number <= 100:
                 return str(number)
+    # 中文季名：第一季 / 第十二季（国产剧目录里很常见）
+    match = re.search(r"第\s*([零一二两三四五六七八九十]+)\s*季", text)
+    if match:
+        number = cn_number(match.group(1))
+        if number is not None and 0 <= number <= 100:
+            return str(number)
     return None
 
 
@@ -1915,9 +1982,16 @@ class Engine:
         self.manifest.save()
         self.report.finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.report.calls = getattr(self.provider, "calls", 0)
+        self.report.retried = getattr(self.provider, "retries", 0)
         logger.info(f"NFO 差异比对结束：扫描 {self.report.scanned}，写入 {self.report.changed_files}，"
                     f"无差异 {self.report.untouched}；图片检查 {self.report.images_scanned}，"
-                    f"写入 {self.report.images_written}")
+                    f"写入 {self.report.images_written}"
+                    + (f"；网络重试 {self.report.retried} 次" if self.report.retried else ""))
+        if self.report.unresolved >= 5:
+            logger.warning(
+                f"本轮有 {self.report.unresolved} 个条目取不到在线数据"
+                f"（已自动重试 {self.report.retried} 次）。若日志多为 SSL 握手超时/连接重置，"
+                f"建议在 MoviePilot 里配置 PROXY_HOST 代理 —— 国内直连 api.themoviedb.org 不稳定")
         return self.report
 
     def scrub_when_unresolved(self, nfo: NfoFile, rel: str, root_dir: Path,
@@ -2101,7 +2175,11 @@ class Engine:
         """比对/补齐该 NFO 对应的图片，返回「需要写盘」的目标数（演练模式下也算）。"""
         if self.cfg.image_mode == IMG_OFF:
             return 0
-        targets = image_targets(nfo, self.cfg.image_kinds)
+        # 季号必须与「取图用的季号」用同一套解析，否则会写出 season00 这种错名
+        season = None
+        if nfo.media_type in ("season", "episodedetails"):
+            season, _ = self.resolve_season_episode(nfo, nfo.media_type)
+        targets = image_targets(nfo, self.cfg.image_kinds, season=season)
         if not targets:
             return 0
         urls = self.fetch_remote_images(nfo, {spec.kind for spec, _ in targets})
