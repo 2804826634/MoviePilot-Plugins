@@ -174,7 +174,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.4.0"
+PLUGIN_VERSION = "1.4.1"
 TIMEOUT = 25
 RATE_GAP = 0.25          # TMDB 限速：最快 4 请求/秒
 NUMBER_TOL = 0.05        # 评分/时长的数值容差，避免 8.4 与 8.40 被判为差异
@@ -359,6 +359,86 @@ def as_str_list(value: Any) -> List[str]:
 to_str_list = as_str_list
 
 
+# ── 宿主返回的结构化值 → 可直接写进 NFO 的文本 ──────────────────────
+# 血泪教训：MoviePilot 的 MediaInfo 里 genres / production_companies / networks 都是
+# List[dict]，directors / actors 是 List[MediaPerson]。若直接 str() 化，
+# "{'id': 12, 'name': '冒险'}" 这种 Python 字面量就会被原样写进 NFO ——
+# 媒体服务器会照原样显示成乱码，Jellyfin 还会把 <director> 按逗号拆成一堆假条目。
+# 所以取值必须逐层剥到「名字」为止。
+_NAME_KEYS = ("name", "title", "original_name", "character")
+_CODE_KEYS = ("iso_3166_1", "english_name", "iso_639_1")
+_IMAGE_KEYS = ("original", "medium", "thumb", "url", "image", "w500")
+
+
+def item_text(value: Any) -> str:
+    """从一个元素里取出可直接写入的文本：字符串原样、dict / 对象取 name 等。"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        for key in _NAME_KEYS + _CODE_KEYS:
+            text = str(value.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+    for attr in _NAME_KEYS:
+        text = str(getattr(value, attr, "") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def text_list(value: Any) -> List[str]:
+    """把标量 / 字符串列表 / 字典列表 / 对象列表，统一变成文本列表。
+
+    这是 HostProvider 的关键防线：宿主给的是结构化对象，必须剥成名字再写。
+    """
+    if value is None or value == "" or value == [] or value == {}:
+        return []
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return [text for text in (item_text(item) for item in items) if text]
+
+
+def person_fields(person: Any) -> Tuple[str, str, str]:
+    """从演员条目里取 (姓名, 角色, 头像)。
+
+    兼容 MoviePilot 的 MediaPerson（角色字段叫 character、头像在 profile_path /
+    images / avatar）与普通 dict；头像本身是 dict 时再往里找一层 url。
+    """
+    def pick(*names: str) -> str:
+        for name in names:
+            value = person.get(name) if isinstance(person, dict) else getattr(person, name, None)
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, dict):
+                for key in _IMAGE_KEYS:
+                    nested = str(value.get(key) or "").strip()
+                    if nested:
+                        return nested
+                continue
+            return str(value).strip()
+        return ""
+
+    return (pick("name"),
+            pick("character", "role"),
+            pick("profile_path", "image", "thumb", "avatar"))
+
+
+def looks_like_object_repr(text: str) -> bool:
+    """判断一个值是不是「Python 对象字面量被 str() 出来」的产物。
+
+    真实元数据几乎不可能长成这样。一旦命中，说明数据源把结构化对象当字符串吐了出来；
+    这种内容写进 NFO 会让媒体服务器显示成乱码，所以宁可跳过并告警，也不写进去。
+    """
+    stripped = str(text or "").strip()
+    if not stripped.startswith(("{", "[")):
+        return False
+    return ("': " in stripped or "\": " in stripped) and "{" in stripped
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 差异比对
 # ══════════════════════════════════════════════════════════════════════
@@ -472,6 +552,11 @@ def write_local_values(nfo: NfoFile, name: str, new_values: List[str], replace: 
             for el in list(root.findall("actor")):
                 root.remove(el)
         else:
+            # 顺手清掉「只有空 name」的 actor 节点：它不含任何信息，却会在媒体服务器里
+            # 显示成一个空白人物（历史版本把结构化对象当字符串处理时写出过这种垃圾节点）
+            for el in list(root.findall("actor")):
+                if not norm_text(el.findtext("name")):
+                    root.remove(el)
             existing = {norm_text(el.findtext("name")).casefold() for el in root.findall("actor")}
             new_values = [v for v in new_values
                           if norm_text(v.split(ACTOR_SEP)[0]).casefold() not in existing]
@@ -986,6 +1071,12 @@ class HostProvider:
 
     @staticmethod
     def _info_to_fields(info: Any, is_tv: bool, limit: int = 20) -> Dict[str, List[str]]:
+        """把宿主的 MediaInfo 转成 {字段名: [文本]}。
+
+        注意：MediaInfo 的 genre / studio / country / director / actor 拿到的是**结构化对象**
+        （List[dict] 或 List[MediaPerson]），必须用 text_list / person_fields 剥成名字，
+        **绝对不要对它们做 str()** —— 那会把 Python 字面量写进用户的 NFO。
+        """
         def g(*names: str) -> Any:
             for name in names:
                 value = getattr(info, name, None)
@@ -998,32 +1089,36 @@ class HostProvider:
             people = people[:limit]
         actors = []
         for person in people:
-            actors.append(ACTOR_SEP.join([
-                str(getattr(person, "name", "") or "").strip(),
-                str(getattr(person, "role", "") or "").strip(),
-                str(getattr(person, "image", "") or getattr(person, "thumb", "") or "").strip(),
-            ]))
+            name, role, image = person_fields(person)
+            if name:                       # 名字为空的条目没有意义，不写
+                actors.append(ACTOR_SEP.join([name, role, image]))
+
+        runtimes = g("episode_run_time")
+        if isinstance(runtimes, (list, tuple)) and runtimes:
+            runtimes = [runtimes[0]]       # 只取第一集时长，避免写出多个 <runtime>
+
         fields = {
-            "title": to_str_list(g("title", "name")),
-            "originaltitle": to_str_list(g("original_title", "original_name")),
-            "plot": to_str_list(g("overview", "plot")),
-            "tagline": to_str_list(g("tagline")),
-            "rating": to_str_list(g("vote_average", "rating")),
-            "genre": to_str_list(g("genres", "genre")),
-            "country": to_str_list(g("country", "production_countries")),
-            "director": to_str_list(g("directors", "director")),
+            "title": text_list(g("title", "name")),
+            "originaltitle": text_list(g("original_title", "original_name")),
+            "plot": text_list(g("overview", "plot")),
+            "tagline": text_list(g("tagline")),
+            "rating": text_list(g("vote_average", "rating")),
+            # 以下都是「名字列表」，宿主给的是对象，必须剥
+            "genre": text_list(g("genres", "genre")),
+            "country": text_list(g("production_countries", "country", "origin_country")),
+            "director": text_list(g("directors", "director")),
             "actor": actors,
         }
         if is_tv:
-            fields["premiered"] = to_str_list(g("first_air_date", "release_date"))
-            fields["year"] = to_str_list(str(g("first_air_date", "release_date") or "").strip()[:4])
-            fields["studio"] = to_str_list(g("networks", "production_companies", "studios"))
-            fields["runtime"] = to_str_list(g("episode_run_time"))
+            fields["premiered"] = text_list(g("first_air_date", "release_date"))
+            fields["year"] = [str(g("first_air_date", "release_date") or "").strip()[:4]]
+            fields["studio"] = text_list(g("networks", "production_companies", "studios"))
+            fields["runtime"] = text_list(runtimes)
         else:
-            fields["premiered"] = to_str_list(g("release_date"))
-            fields["year"] = to_str_list(str(g("release_date") or "").strip()[:4])
-            fields["runtime"] = to_str_list(g("runtime"))
-            fields["studio"] = to_str_list(g("production_companies", "studios"))
+            fields["premiered"] = text_list(g("release_date"))
+            fields["year"] = [str(g("release_date") or "").strip()[:4]]
+            fields["runtime"] = text_list(g("runtime"))
+            fields["studio"] = text_list(g("production_companies", "studios"))
         return {k: v for k, v in fields.items() if v}
 
     def fetch_movie(self, tmdb_id: str) -> Dict[str, List[str]]:
@@ -1338,6 +1433,23 @@ class Engine:
         self.single_file = single_file
         self.report = Report(mode=cfg.mode, provider=getattr(provider, "name", "?"))
         self.manifest = ImageManifest(cfg.manifest_path)
+        self._warned_junk: set = set()      # 脏值告警去重，避免刷屏
+
+    def sanitize_remote(self, field: str, values: List[str]) -> List[str]:
+        """护栏：拦掉「结构化对象被 str() 出来」的脏值。
+
+        真实元数据不可能长成 {'id': 12, 'name': '冒险'} 这样。一旦出现，说明数据源有 bug；
+        这种内容写进 NFO 会让媒体服务器显示成乱码（Jellyfin 还会把 <director> 按逗号
+        拆成一堆假条目），所以宁可跳过并告警，也绝不能写进用户的媒体库。
+        """
+        clean, junk = [], []
+        for value in values:
+            (junk if looks_like_object_repr(value) else clean).append(value)
+        if junk and field not in self._warned_junk:
+            self._warned_junk.add(field)
+            logger.warning(f"在线数据里的「{field}」疑似把结构化对象直接转成了字符串，"
+                           f"已跳过该值（请把这条反馈给数据源）：{junk[0][:80]}")
+        return clean
 
     # ── 在线数据获取 ────────────────────────────────────────────────
     def fetch_remote(self, nfo: NfoFile) -> Tuple[Dict[str, List[str]], str]:
@@ -1489,7 +1601,7 @@ class Engine:
         for name in managed:
             kind = FIELD_KINDS.get(name, "text")
             local_vals = read_local_values(nfo, name)
-            remote_vals = to_str_list(remote.get(name))
+            remote_vals = self.sanitize_remote(name, to_str_list(remote.get(name)))
             verdict, action = compare(kind, local_vals, remote_vals)
             self.report.counts[verdict] = self.report.counts.get(verdict, 0) + 1
             if action == SKIP:

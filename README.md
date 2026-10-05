@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.4.0-blue)
+![version](https://img.shields.io/badge/version-1.4.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -315,7 +315,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 57 项断言（含图片补齐/别名/指纹幂等/#类型限定）
-python tests/_self_test_plugin.py   # 插件面 94 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复）
+python tests/_self_test_plugin.py   # 插件面 113 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
@@ -356,6 +356,32 @@ moviepilot-nfo-gapfill/
 ```
 
 > MoviePilot 约定：**类名 = 插件 ID**（`NfoGapFill`），**目录名 = 类名小写**（`nfogapfill`），入口固定为 `__init__.py`。
+
+---
+
+## 修复历史版本写坏过的 NFO
+
+如果你在 Jellyfin / Emby 里看到**类型、导演、工作室**等字段显示成
+`{'id': 12, 'name': '冒险'}` 这种 Python 字面量，那是 **v1.4.0 及更早版本的一个 bug**。
+
+原因：插件走「复用 MoviePilot 刮削通道」这条路时，宿主返回的 `genres` /
+`production_companies` / `directors` / `actors` 是**结构化对象**（`List[dict]`、
+`List[MediaPerson]`），而旧版本对它们直接做了 `str()`，于是把 Python 字面量写进了 NFO。
+Jellyfin 读 `<director>` 时还会**按逗号拆分**多值字段，所以一个坏值会裂变成一堆「假导演」，
+看起来就是演职人员里多出几个叫 `{adult: False`、`'gender': 1` 的人。
+
+**v1.4.1 已修好**：取值改为逐层剥到「名字」为止，兼容 dict 与对象两种形态。
+另外加了一道**护栏** —— 即便数据源以后再犯，疑似对象字面量的值也会被跳过并写进告警日志，
+绝不会再写进你的媒体库。
+
+### 已经被写坏的文件怎么修
+
+不用手工改。升级到 v1.4.1 后，用 `模式 = 不一致则替换`（`sync`，默认就是它）跑一轮即可：
+
+本地是脏值、在线是干净名字 → 判定「不一致」→ 直接替换掉。
+
+顺带会清掉旧版本可能留下的**空演员节点**（在媒体服务器里会显示成一个空白人物）。
+跑完让媒体服务器刷新一下元数据即可。
 
 ---
 

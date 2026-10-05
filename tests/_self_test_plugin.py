@@ -6,6 +6,7 @@
     python _self_test_plugin.py
 """
 import importlib.util
+import json
 import os
 import shutil
 import sys
@@ -228,6 +229,163 @@ check("类型限定只放行对应类型（限电影只收 movie，限电视剧�
       and module.type_allowed(None, "movie") and module.type_allowed(None, "tvshow"))
 check("目录键必须与最终 roots 字符串一致（否则限定会失效）",
       all(k in [str(p) for p in roots] for k in types))
+
+print()
+print("=" * 70)
+print("回归：宿主 MediaInfo 的结构化对象不能被 str() 写进 NFO")
+print("=" * 70)
+
+
+class FakePerson:
+    """模拟 MoviePilot 的 MediaPerson（角色字段叫 character，头像在 profile_path）。"""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class FakeInfo:
+    """模拟 MoviePilot 的 MediaInfo（genres / production_companies 是 List[dict]）。"""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+# 数据照抄用户截图里那部片（疯狂动物城2 / Pixar）
+fake_info = FakeInfo(
+    title="疯狂动物城2", original_title="Zootopia 2",
+    overview="兔子朱迪与狐狸尼克再度联手。", tagline="",
+    vote_average=7.2, release_date="2025-11-26", runtime=108,
+    genres=[{"id": 12, "name": "冒险"}, {"id": 16, "name": "动画"},
+            {"id": 35, "name": "喜剧"}, {"id": 10751, "name": "家庭"},
+            {"id": 878, "name": "科幻"}],
+    directors=[{"adult": False, "gender": 1, "id": 1485788, "department": "Production",
+                "job": "Producer", "name": "Nicole Paradis Grindle"},
+               {"id": 1491592, "department": "Directing", "job": "Director",
+                "name": "丹尼尔·钟"}],
+    production_companies=[{"id": 3, "logo_path": "/x.png", "name": "Pixar",
+                           "origin_country": "US"}],
+    production_countries=[{"iso_3166_1": "US", "name": "United States of America"}],
+    actors=[FakePerson(name="Ginnifer Goodwin", character="Judy Hopps",
+                       profile_path="/abc.jpg", images={"thumb": "/abc_thumb.jpg"}),
+            {"name": "Jason Bateman", "character": "Nick Wilde", "profile_path": "/def.jpg"},
+            {"name": "", "character": "无名氏"}],          # 没名字的条目应被丢弃
+)
+host_fields = module.HostProvider._info_to_fields(fake_info, False, 20)
+
+check("genre 被剥成纯名字（不再是 {'id': 12, 'name': '冒险'}）",
+      host_fields.get("genre") == ["冒险", "动画", "喜剧", "家庭", "科幻"],
+      str(host_fields.get("genre")))
+check("director 被剥成纯名字", host_fields.get("director") == ["Nicole Paradis Grindle", "丹尼尔·钟"],
+      str(host_fields.get("director")))
+check("studio 取到 Pixar（而不是公司对象）", host_fields.get("studio") == ["Pixar"],
+      str(host_fields.get("studio")))
+check("country 取到国家名（而不是国家对象）",
+      host_fields.get("country") == ["United States of America"])
+check("runtime / year 正常", host_fields.get("runtime") == ["108"]
+      and host_fields.get("year") == ["2025"])
+check("演员：对象与 dict 两种形态都能取到 姓名/角色/头像",
+      [a.split(module.ACTOR_SEP) for a in host_fields.get("actor", [])]
+      == [["Ginnifer Goodwin", "Judy Hopps", "/abc.jpg"],
+          ["Jason Bateman", "Nick Wilde", "/def.jpg"]],
+      str(host_fields.get("actor")))
+check("没名字的演员条目被丢弃", len(host_fields.get("actor", [])) == 2)
+check("整份输出里不含任何 Python 对象字面量",
+      not any(module.looks_like_object_repr(v)
+              for vals in host_fields.values() for v in vals),
+      str(host_fields))
+
+# 剧集：episode_run_time 是 list，不能被写成多个 <runtime>
+tv_info = FakeInfo(title="某剧", first_air_date="2016-07-15", episode_run_time=[50, 60],
+                   networks=[{"id": 213, "name": "Netflix"}],
+                   origin_country=["US"], genres=[{"id": 18, "name": "剧情"}])
+tv_fields = module.HostProvider._info_to_fields(tv_info, True, 20)
+check("剧集时长只取第一个（不会写出多个 runtime）", tv_fields.get("runtime") == ["50"])
+check("剧集 studio 取网络方名字", tv_fields.get("studio") == ["Netflix"])
+check("只有 ISO 代码时 country 也能取到值", tv_fields.get("country") == ["US"])
+check("剧集 year 由首播日期截出", tv_fields.get("year") == ["2016"])
+
+# 基础工具函数
+check("item_text 覆盖 字符串 / 数字 / dict / 对象 四种输入",
+      module.item_text(" 冒险 ") == "冒险" and module.item_text(12) == "12"
+      and module.item_text({"id": 12, "name": "冒险"}) == "冒险"
+      and module.item_text(FakePerson(name="Pixar")) == "Pixar"
+      and module.item_text({"id": 1}) == "" and module.item_text(None) == "")
+check("text_list 覆盖标量 / 字符串列表 / dict 列表 / 对象列表",
+      module.text_list("科幻") == ["科幻"]
+      and module.text_list(["科幻", "冒险"]) == ["科幻", "冒险"]
+      and module.text_list([{"name": "科幻"}, {"name": "冒险"}]) == ["科幻", "冒险"]
+      and module.text_list(None) == [] and module.text_list([]) == [])
+check("looks_like_object_repr 能识别截图里那种脏值",
+      module.looks_like_object_repr("{'id': 12, 'name': '冒险'}")
+      and module.looks_like_object_repr("[{'a': 1}]")
+      and not module.looks_like_object_repr("冒险")
+      and not module.looks_like_object_repr("标题：{大冒险}")     # 正常文本不受影响
+      and not module.looks_like_object_repr("2016-07-15"))
+
+# 引擎护栏：即便数据源真的吐出对象字面量，也不能写进用户的 NFO
+guard_root = DATA_PATH / "guardlib"
+guard_movie = guard_root / "电影" / "测试 (2020)"
+guard_movie.mkdir(parents=True, exist_ok=True)
+guard_nfo = guard_movie / "movie.nfo"
+guard_nfo.write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<movie>\n'
+    '  <title>测试</title>\n  <year>2020</year>\n  <tmdbid>999</tmdbid>\n'
+    '  <genre>科幻</genre>\n</movie>\n', encoding="utf-8")
+guard_cache = DATA_PATH / "guard_cache.json"
+guard_cache.write_text(json.dumps({"movie:999": {
+    "title": ["测试"], "year": ["2020"],
+    "genre": ["{'id': 12, 'name': '冒险'}"],          # 数据源出 bug，吐了对象字面量
+}}, ensure_ascii=False), encoding="utf-8")
+guard_cfg = module.EngineConfig(roots=[guard_root], mode="sync",
+                                manifest_path=DATA_PATH / "guard_manifest.json")
+guard_report = module.Engine(guard_cfg, module.FileProvider(str(guard_cache))).run()
+guard_after = guard_nfo.read_text(encoding="utf-8")
+check("护栏生效：脏值没有被写进 NFO（本地原值保持不动）",
+      "科幻" in guard_after and "{'id'" not in guard_after, guard_after)
+check("该字段被判定为「仅本地有」而不是「替换」（说明值确实被拦下了）",
+      guard_report.counts.get(module.LOCAL_ONLY, 0) >= 1, str(guard_report.counts))
+
+# 历史版本可能写出「只有空 name」的 actor 节点，会在媒体服务器里显示成空白人物
+actor_root = DATA_PATH / "actorlib"
+actor_movie = actor_root / "电影" / "空演员 (2021)"
+actor_movie.mkdir(parents=True, exist_ok=True)
+actor_cache = DATA_PATH / "actor_cache.json"
+actor_cache.write_text(json.dumps({"movie:998": {
+    "title": ["空演员"], "year": ["2021"],
+    "actor": ["真实演员|主角|", "新增演员|配角|"],
+}}, ensure_ascii=False), encoding="utf-8")
+
+# 场景 A：本地只剩空 actor 节点（历史脏数据的典型形态）→ 本地读出来是空，
+#         于是判定为「补齐」，会走 replace=False 的补写路径，正好验证清理逻辑
+actor_nfo = actor_movie / "movie.nfo"
+actor_nfo.write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<movie>\n'
+    '  <title>空演员</title>\n  <year>2021</year>\n  <tmdbid>998</tmdbid>\n'
+    '  <actor><name></name><role>导演</role></actor>\n'
+    '  <actor><name>   </name></actor>\n'
+    '</movie>\n', encoding="utf-8")
+module.Engine(module.EngineConfig(roots=[actor_root], mode="sync",
+                                  manifest_path=DATA_PATH / "actor_m1.json"),
+              module.FileProvider(str(actor_cache))).run()
+after_a = actor_nfo.read_text(encoding="utf-8")
+check("补齐时清掉空的 actor 节点（不再留下空白人物 / 假导演）",
+      after_a.count("<actor>") == 2 and "<role>导演</role>" not in after_a
+      and "真实演员" in after_a and "新增演员" in after_a, after_a)
+
+# 场景 B：本地有旧演员（与在线不一致）→ 走整体替换，同样不该残留空节点
+actor_nfo.write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<movie>\n'
+    '  <title>空演员</title>\n  <year>2021</year>\n  <tmdbid>998</tmdbid>\n'
+    '  <actor><name></name><role>导演</role></actor>\n'
+    '  <actor><name>旧演员</name><role>配角</role></actor>\n'
+    '</movie>\n', encoding="utf-8")
+module.Engine(module.EngineConfig(roots=[actor_root], mode="sync",
+                                  manifest_path=DATA_PATH / "actor_m2.json"),
+              module.FileProvider(str(actor_cache))).run()
+after_b = actor_nfo.read_text(encoding="utf-8")
+check("替换时旧演员与空节点一起被清掉，只留在线值",
+      after_b.count("<actor>") == 2 and "旧演员" not in after_b
+      and "<role>导演</role>" not in after_b, after_b)
 
 # 演员上限：0 表示不限制
 cast30 = {"cast": [{"name": f"演员{i}", "character": "路人"} for i in range(30)]}

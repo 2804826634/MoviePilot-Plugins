@@ -109,6 +109,9 @@ docker restart moviepilot-v2
 | 点了运行但没变化 | `mode` 是否为 `report`？`dry_run` 是否开着？字段是否命中 `protect_fields` 或 NFO 内 `lockedfields`？ |
 | 报错 `429 Too Many Requests` | TMDB 限速，调小批次并错峰运行；内置限速为 4 req/s |
 | 中文标点被改成半角 | 属于历史 bug，已在 v1.0.0 修复：比对走 NFKC 归一化，写入始终用原值 |
+| 类型/导演/工作室显示成 `{'id': 12, 'name': '冒险'}` 这种 Python 字面量 | v1.4.0 及更早版本的 bug：走宿主刮削通道时，宿主的 `genres`/`production_companies`/`directors` 是结构化对象，旧版直接 `str()` 写进了 NFO。**升级到 v1.4.1 后用 `sync` 模式跑一轮即可自动修好**（本地脏值 vs 在线干净名字 → 判定不一致 → 替换） |
+| 演职人员里多出几个叫 `{adult: False`、`'gender': 1` 的人 | 同一个 bug 的连带现象：Jellyfin 读 `<director>` 会按逗号拆分多值字段，一个坏值裂变成一堆「假导演」。同上，跑一轮 `sync` 即可清掉 |
+| 日志出现「在线数据里的「xx」疑似把结构化对象直接转成了字符串」 | 这是 v1.4.1 新增的护栏在起作用：它拦下了疑似对象字面量的在线值，**保住了你已有的内容**。请把这条日志反馈上来（属于数据源 bug），不会影响其它字段 |
 
 ### 图片相关的现象
 
