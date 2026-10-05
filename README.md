@@ -76,14 +76,14 @@ MoviePilot 官方的「媒体库刮削」（`LibraryScraper`）插件对已有 N
 2. 填入本仓库地址：
 
    ```
-   peter_chen/moviepilot-nfo-gapfill
+   2804826634/moviepilot-nfo-gapfill
    ```
 
    或通过环境变量固定（`docker-compose.yml`）：
 
    ```yaml
    environment:
-     - PLUGIN_MARKET=peter_chen/moviepilot-nfo-gapfill
+     - PLUGIN_MARKET=2804826634/moviepilot-nfo-gapfill
    ```
 
 3. 在市场里找到「**NFO 差异比对与补齐**」→ 安装 → 启用。
@@ -93,7 +93,7 @@ MoviePilot 官方的「媒体库刮削」（`LibraryScraper`）插件对已有 N
 ### 方式 B：本地插件仓库（离线、可版本管理）
 
 ```bash
-git clone https://github.com/peter_chen/moviepilot-nfo-gapfill.git /path/to/mp_plugins
+git clone https://github.com/2804826634/moviepilot-nfo-gapfill.git /path/to/mp_plugins
 ```
 
 ```yaml

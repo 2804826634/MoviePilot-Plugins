@@ -979,7 +979,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     # 插件版本
     plugin_version = PLUGIN_VERSION
     # 插件作者
-    plugin_author = "peter_chen"
+    plugin_author = "MC星云"
     # 作者主页
     author_url = ""
     # 插件配置项ID前缀
