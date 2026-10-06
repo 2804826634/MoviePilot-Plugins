@@ -180,7 +180,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.7.1"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
