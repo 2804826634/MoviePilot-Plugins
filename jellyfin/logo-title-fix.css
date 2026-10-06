@@ -1,0 +1,61 @@
+/* =====================================================================
+   Jellyfin 详情页：logo 图 与 文字标题 二选一
+   （配套 NFO 差异比对 / NfoGapFill 插件，仅作便利附带）
+
+   行为：
+     · 有 logo  → 只显示 logo（强制可见），隐藏文字标题
+     · 没 logo  → 显示文字标题（Jellyfin 默认行为，不干预）
+
+   用法：Jellyfin 仪表盘 → 控制台 → 常规 →「自定义 CSS 代码」，
+        在你现有皮肤的 @import 之后，追加这一行即可：
+
+     @import url("https://cdn.jsdelivr.net/gh/2804826634/moviepilot-nfo-gapfill@main/jellyfin/logo-title-fix.css");
+
+   注意：
+     1) @import 必须放在所有普通 CSS 规则「之前」（即盒子最顶部）。
+        如果你的自定义 CSS 里除了皮肤 @import 还有别的规则，请把两条
+        @import 都挪到最前面。
+     2) 改完浏览器硬刷新（Ctrl + F5），Jellyfin 前端 CSS 缓存很顽固。
+
+   ── 为什么这么写（已对照 Jellyfin 源码，不是猜）────────────────────
+   Jellyfin 的详情页是 legacy controller：
+     src/apps/legacy/controllers/itemDetails/index.js 第 694–702 行：
+
+        const detailLogo = page.querySelector('.detailLogo');
+        const url = logoImageUrl(item, apiClient, {});
+        if (url) {
+            detailLogo.classList.remove('hide');   // 有 logo → 去掉 .hide
+            imageLoader.setLazyImage(detailLogo, url);
+        } else {
+            detailLogo.classList.add('hide');       // 没 logo → 加 .hide
+        }
+
+   - 模板里 .detailLogo 这个 div 始终存在（index.html 第 4 行），
+     它和文字标题 .itemName 的共同祖先是 #itemDetailPage（itemName 在更深的
+     .nameContainer 里），所以用 #itemDetailPage:has(...) 联动。
+   - 「有没有 logo」的可靠标志是 .hide 类，而不是 background-image。
+   - jellyskin-sc 这类皮肤里有 `#itemDetailPage .detailLogo{display:none}`，
+     会强行把 logo 藏掉。本文件用 display:block !important 在有 logo 时把它
+     重新显示出来，否则会变成「logo 和文字都被藏掉、标题区空白」。
+   ===================================================================== */
+
+/* 1) 有 logo（.detailLogo 不带 .hide）→ 强制显示 logo，并隐藏文字标题 */
+#itemDetailPage .detailLogo:not(.hide) {
+    display: block !important;   /* 覆盖皮肤里的 display:none，真把 logo 显示出来 */
+}
+
+#itemDetailPage:has(.detailLogo:not(.hide)) .itemName,
+#itemDetailPage:has(.detailLogo:not(.hide)) .parentName {
+    display: none !important;    /* 片名 / 剧集名 / 季名等文字标题都不显示 */
+}
+
+/* 2) 没 logo（.detailLogo.hide）→ 不写任何规则，Jellyfin 默认就只显示文字 */
+
+/* ── 备选：如果你其实只想保留文字、彻底不要 logo 图 ─────────────────
+   把上面 1) 整段删掉，改成下面两行（jellyskin 其实已经做了一半，
+   这能把残留也压掉）：
+
+   #itemDetailPage .detailLogo { display: none !important; }
+   #itemDetailPage .itemName,
+   #itemDetailPage .parentName { display: block !important; }
+   ===================================================================== */
