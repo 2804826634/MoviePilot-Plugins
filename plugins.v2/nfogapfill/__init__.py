@@ -181,7 +181,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.7.4"
+PLUGIN_VERSION = "1.7.6"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -371,12 +371,21 @@ def download_bytes(url: str, opener: Any = None, attempts: int = 3) -> Optional[
 # ══════════════════════════════════════════════════════════════════════
 # fanart.tv：光盘图 / 横幅图 / 透明艺术图 / 横版缩略图只有这里有
 # 映射关系照抄 MoviePilot 的 FanartModule._FANART_NAME_MAP，命名保持一致。
+# 另有「季」专用键（seasonbanner / seasonthumb），它们在 fanart 响应里是
+# **带 season 字段的数组**，必须按季号筛选，见 fanart_image_urls()。
 # ══════════════════════════════════════════════════════════════════════
 FANART_KEYS: Dict[str, Tuple[str, ...]] = {
     "banner": ("moviebanner", "tvbanner"),
     "disc": ("moviedisc",),
     "clearart": ("hdmovieclearart", "movieart", "hdclearart"),
     "landscape": ("moviethumb", "tvthumb"),
+}
+
+# 季级别专用的 fanart 键：数组内每条都带 season 字段，按季号挑
+FANART_SEASON_KEYS: Dict[str, Tuple[str, ...]] = {
+    "poster": ("seasonposter",),
+    "banner": ("seasonbanner",),
+    "thumb": ("seasonthumb",),
 }
 
 
@@ -413,18 +422,13 @@ def pick_fanart_image(entries: List[dict]) -> Optional[str]:
     return min(valid, key=rank)["url"]
 
 
-def fanart_image_urls(kinds: set, tmdb_id: str, tvdb_id: str,
-                      api_key: str) -> Dict[str, str]:
-    """从 fanart.tv 取 TMDB 拿不到的那几类图，返回 {图片类型: 地址}。
+def _fanart_request(tmdb_id: str, tvdb_id: str, api_key: str) -> Optional[dict]:
+    """向 fanart.tv 发一次请求，返回原始 JSON（失败返回 None）。
 
     电影按 tmdbid 查，剧集按 thetvdb id 查（fanart.tv 的剧集接口只认 tvdb id）。
-    没有 Key、查不到、或这几类一个都不需要时返回空 dict，调用方自行兜底。
     """
-    wanted = {kind for kind in kinds or () if kind in FANART_KEYS}
-    if not wanted or not api_key:
-        return {}
-    if any(kind in FANART_KEYS for kind in wanted) and not (tmdb_id or tvdb_id):
-        return {}
+    if not api_key or not (tmdb_id or tvdb_id):
+        return None
     # 剧集接口按 thetvdb id 查；电影按 tmdbid 查
     tv_mode = bool(tvdb_id) or not tmdb_id
     query = tvdb_id or tmdb_id
@@ -437,13 +441,63 @@ def fanart_image_urls(kinds: set, tmdb_id: str, tvdb_id: str,
             data = json.loads(response.read().decode("utf-8", "replace"))
     except Exception as exc:
         logger.warning(f"fanart.tv 查询失败（{segment}/{query}）：{exc}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def fanart_image_urls(kinds: set, tmdb_id: str, tvdb_id: str,
+                      api_key: str) -> Dict[str, str]:
+    """从 fanart.tv 取 TMDB 拿不到的那几类图，返回 {图片类型: 地址}。
+
+    没有 Key、查不到、或这几类一个都不需要时返回空 dict，调用方自行兜底。
+    """
+    wanted = {kind for kind in kinds or () if kind in FANART_KEYS}
+    if not wanted:
         return {}
-    if not isinstance(data, dict):
+    data = _fanart_request(tmdb_id, tvdb_id, api_key)
+    if data is None:
         return {}
     out: Dict[str, str] = {}
     for kind in sorted(wanted):
         for key in FANART_KEYS[kind]:
             best = pick_fanart_image(data.get(key) or [])
+            if best:
+                out[kind] = best
+                break
+    return out
+
+
+def fanart_season_image_urls(kinds: set, season: Any, tvdb_id: str,
+                             api_key: str) -> Dict[str, str]:
+    """从 fanart.tv 取**某一季**的图片，返回 {图片类型: 地址}。
+
+    季图片在 fanart 响应里是 seasonposter / seasonbanner / seasonthumb 三个数组，
+    数组内每条都带 `season` 字段，必须按季号筛出属于这一季的条目
+    （这与根目录的 tvposter/tvbanner/tvthumb 是完全不同的结构，不能混用）。
+
+    季 0 在 fanart 里用 "0" 表示（特别篇）。取不到时返回空 dict。
+    """
+    wanted = {kind for kind in kinds or () if kind in FANART_SEASON_KEYS}
+    if not wanted or not tvdb_id:
+        return {}
+    season_key = str(season).strip() if season is not None else ""
+    if not season_key:
+        return {}
+    # 规范化：'1' / '01' / 'Season 1' 统一成 '1'
+    digits = re.sub(r"\D", "", season_key)
+    if not digits:
+        return {}
+    season_key = str(int(digits))
+    data = _fanart_request("", tvdb_id, api_key)
+    if data is None:
+        return {}
+    out: Dict[str, str] = {}
+    for kind in sorted(wanted):
+        for key in FANART_SEASON_KEYS[kind]:
+            entries = [item for item in (data.get(key) or [])
+                       if str(item.get("season", "")).strip()
+                       and str(int(re.sub(r"\D", "0", str(item.get("season"))))) == season_key]
+            best = pick_fanart_image(entries)
             if best:
                 out[kind] = best
                 break
@@ -807,20 +861,34 @@ def write_nfo_file(nfo: NfoFile, backup_root: Optional[Path], root_dir: Path) ->
 
 # ══════════════════════════════════════════════════════════════════════
 # 图片规格与落盘
-#   命名遵循 MP / Kodi / Jellyfin 共同认可的约定（对照 MP 的
-#   app/chain/media.py 里 IMAGE_ALIASES 与季目录 naming 规则），列在这里以免写错：
-#     · 电影 / 剧集目录：poster.jpg、backdrop.jpg（+ fanart.jpg 别名）、logo.png
-#     · 季目录：poster.jpg（只此一处；不再往剧集根目录写 seasonNN-poster.jpg）
+#   命名严格对照 MP 官方规则（app/chain/media.py 的 IMAGE_ALIASES /
+#   季目录 naming / 季图双落点，以及 tests/test_mediascrape.py 的断言）：
+#     · 电影目录：poster.jpg、backdrop.jpg（+ fanart.jpg 别名）、logo.png、
+#                 disc.png、banner.jpg、clearart.png、thumb.jpg（+ landscape.jpg 别名）
+#     · 剧集目录：同电影，但**没有 disc**（MP 的 tv 允许集合里不含 disc）
+#     · 季：**两处都写**（与 MP 的 _get_target_fileitems_and_paths 一致）——
+#             ① 该季自己的目录内：poster.jpg、banner.jpg、thumb.jpg（+ landscape.jpg 别名）
+#             ② 剧集根目录：seasonNN-poster.jpg 等 seasonNN-xxx 形式
+#           （MP 的 season 还列了 backdrop，但没有数据源能提供季 backdrop）
 #     · 单集：<视频文件名>.jpg，与 MP 的写法一致，放在视频同级目录
-#   注意：TMDB 只提供 poster / backdrop / logo / still 四类；
-#   banner、clearart、discart、landscape 需要 fanart.tv，不在本插件范围内。
+#
+#   MP 的别名表 IMAGE_ALIASES = {backdrop→fanart, thumb→landscape}（双向），
+#   含义是「同一张图写两个文件名」，所以这里用 alias=True 标出第二份副本。
+#
+#   季图的根目录副本（seasonNN-xxx）**不生成别名** —— MP 的 _expand_with_aliases
+#   遇到 season 前缀会直接跳过，本插件保持一致（见 image_targets / root_name）。
+#
+#   图片来源：TMDB 提供 poster / backdrop / logo / still；
+#   banner、clearart、disc、thumb(landscape) 由 fanart.tv 提供。
 # ══════════════════════════════════════════════════════════════════════
 @dataclass(frozen=True)
 class ImageSpec:
-    kind: str                 # poster / backdrop / logo / thumb
+    kind: str                 # poster / backdrop / logo / thumb / banner / disc / clearart / landscape
     name: str                 # 目标文件名模板，可用 {stem} / {season}
     alias: bool = False       # 与同 kind 的主图内容相同，只是多写一份别名文件
     in_parent: bool = False   # 落到上级目录（当前没有图片类型使用，保留能力备用）
+    root_name: Optional[str] = None   # 季图在剧集根目录的副本名，如 "season{season:02d}-poster.jpg"
+                                      # 仅 season 用；None 表示不写根目录副本
 
 
 IMAGE_SPECS: Dict[str, List[ImageSpec]] = {
@@ -829,33 +897,70 @@ IMAGE_SPECS: Dict[str, List[ImageSpec]] = {
         ImageSpec("backdrop", "backdrop.jpg"),
         ImageSpec("backdrop", "fanart.jpg", alias=True),        # Kodi / Emby 认 fanart
         ImageSpec("logo", "logo.png"),
-        ImageSpec("banner", "banner.jpg"),
         ImageSpec("disc", "disc.png"),
+        ImageSpec("banner", "banner.jpg"),
         ImageSpec("clearart", "clearart.png"),
-        ImageSpec("landscape", "landscape.jpg"),
+        ImageSpec("thumb", "thumb.jpg"),
+        ImageSpec("thumb", "landscape.jpg", alias=True),        # landscape 是 thumb 的别名
     ],
     "tvshow": [
+        # MP 的 tv 允许集合里没有 disc，所以剧集目录不写 disc.png
         ImageSpec("poster", "poster.jpg"),
         ImageSpec("backdrop", "backdrop.jpg"),
         ImageSpec("backdrop", "fanart.jpg", alias=True),
         ImageSpec("logo", "logo.png"),
         ImageSpec("banner", "banner.jpg"),
-        ImageSpec("disc", "disc.png"),
         ImageSpec("clearart", "clearart.png"),
-        ImageSpec("landscape", "landscape.jpg"),
+        ImageSpec("thumb", "thumb.jpg"),
+        ImageSpec("thumb", "landscape.jpg", alias=True),
     ],
     "season": [
-        # 季海报只放在**该季自己的目录**里，且统一命名为 poster.jpg。
-        # 不再往剧集根目录写 seasonNN-poster.jpg —— 那会把各季海报堆到同一个目录下
-        # （与「一季一图、各归其位」的约定相悖），用户明确要求去掉。
-        ImageSpec("poster", "poster.jpg"),
-        ImageSpec("banner", "banner.jpg"),
-        ImageSpec("landscape", "landscape.jpg"),
+        # 季图**两处都写**，完全对齐 MP 的 _get_target_fileitems_and_paths：
+        #   ① 该季自己的目录内 → 通用名（poster.jpg / banner.jpg / thumb.jpg …）
+        #      Jellyfin / Kodi 在季目录里读的就是这些通用名；
+        #   ② 剧集根目录      → seasonNN-xxx（season01-poster.jpg 等）
+        #      兼容只认根目录 seasonNN 命名的媒体服务器。
+        # 季 0（特别篇）在 MP 里写作 season-specials-poster，这里同样支持。
+        #
+        # 类型集合与 MP 的 season 配置项（poster/backdrop/banner/thumb/landscape）
+        # 对齐，但**只列出真的有数据源的**：
+        #   · poster      ← TMDB 季 poster_path（MP 的 get_season_poster）
+        #   · thumb       ← fanart.tv seasonthumb，同时写 landscape 别名
+        #   · banner      ← fanart.tv seasonbanner
+        # MP 的 season 还列了 backdrop，但 TMDB 的 /tv/{id}/season/{n}/images
+        # 只返回 posters，fanart 的季接口也只有 seasonposter/seasonthumb/seasonbanner，
+        # 谁都不提供季 backdrop —— 写进去只会是永远取不到图的空转，故不列。
+        #
+        # 注意 root_name 只给**非别名**的 spec：MP 的 _expand_with_aliases 遇到
+        # season 前缀会跳过，所以根目录只会出现 season01-poster.jpg / -banner /
+        # -thumb，不会出现 season01-fanart.jpg / -landscape（与 MP 一致）。
+        ImageSpec("poster", "poster.jpg",
+                  root_name="season{season:02d}-poster.jpg"),
+        ImageSpec("banner", "banner.jpg",
+                  root_name="season{season:02d}-banner.jpg"),
+        ImageSpec("thumb", "thumb.jpg",
+                  root_name="season{season:02d}-thumb.jpg"),
+        ImageSpec("thumb", "landscape.jpg", alias=True),
     ],
     "episodedetails": [
         ImageSpec("thumb", "{stem}.jpg"),
     ],
 }
+
+
+def season_root_name(spec: "ImageSpec", season_num: int) -> Optional[str]:
+    """季图在**剧集根目录**的副本名，如 season01-poster.jpg；不需要副本时返回 None。
+
+    对齐 MP 的 `_get_target_fileitems_and_paths`：季 0（特别篇）在 MP 里写作
+    `season-specials-poster`（见 TmdbScraper.get_season_poster 与 FanartModule），
+    其余季号补零成两位。
+    """
+    if not spec.root_name:
+        return None
+    if season_num == 0:
+        # season{season:02d}-poster.jpg → season-specials-poster.jpg
+        return spec.root_name.replace("season{season:02d}-", "season-specials-")
+    return spec.root_name.format(season=season_num)
 
 
 def image_targets(nfo: NfoFile, kinds: set,
@@ -869,6 +974,12 @@ def image_targets(nfo: NfoFile, kinds: set,
     结果是「拿第 1 季的图、写成 season00 的名字」。
 
     因此：**解析不出季号时直接跳过季专用文件名**（宁可不写，也不写错季）。
+
+    季图会产出**两个落点**（与 MP 一致）：
+      · 季目录内 → `poster.jpg`（通用名，Jellyfin/Kodi 读这个）
+      · 剧集根目录 → `seasonNN-poster.jpg`（兼容只认根目录命名的服务器）
+    别名（fanart / landscape）只在季目录内产生，根目录副本不带别名 ——
+    MP 的 `_expand_with_aliases` 遇到 season 前缀同样会跳过。
     """
     specs = IMAGE_SPECS.get(nfo.media_type, [])
     if not specs:
@@ -889,6 +1000,11 @@ def image_targets(nfo: NfoFile, kinds: set,
         name = spec.name.format(stem=nfo.path.stem,
                                season=season_num if season_num is not None else 0)
         base = nfo.path.parent.parent if spec.in_parent else nfo.path.parent
+        # 季图的根目录副本：只对**非别名**的 spec 生成（与 MP 的别名跳过规则一致）
+        if spec.root_name and not spec.alias and season_num is not None:
+            root = season_root_name(spec, season_num)
+            if root:
+                out.append((spec, nfo.path.parent.parent / root))
         out.append((spec, base / name))
     return out
 
@@ -1288,6 +1404,17 @@ class TmdbProvider:
             best = pick_best_image(data.get(IMG_API_KEYS.get(kind, "")) or [], self.language)
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
+        # 季：TMDB 只给 poster，banner / thumb 得去 fanart 的
+        # seasonposter / seasonbanner / seasonthumb 取（按季号筛选）
+        if media_type == "season" and season:
+            season_missing = {k for k in kinds if k in FANART_SEASON_KEYS and k not in out}
+            if season_missing:
+                tvdb_id = self._tvdb_id(tmdb_id)
+                if tvdb_id and self.fanart_key:
+                    for kind, url in fanart_season_image_urls(
+                            season_missing, season, tvdb_id, self.fanart_key).items():
+                        out.setdefault(kind, url)
+            return out
         # TMDB 只有海报 / 背景图 / 徽标 / 剧照；光盘图、横幅图、透明艺术图、横版缩略图
         # 只有 fanart.tv 提供，需要额外查一次（电影按 tmdbid，剧集按 thetvdb id）
         missing = {kind for kind in kinds if kind in FANART_KEYS and kind not in out}
@@ -1300,14 +1427,19 @@ class TmdbProvider:
                       " FANART_API_KEY，MP 自带默认值）—— 这几类本轮跳过")
             missing = set()
         if missing:
-            tvdb_id = ""
-            if media_type != "movie":
-                external = self._get(f"/tv/{tmdb_id}/external_ids") or {}
-                tvdb_id = str(external.get("tvdb_id") or "").strip()
+            tvdb_id = self._tvdb_id(tmdb_id) if media_type != "movie" else ""
             for kind, url in fanart_image_urls(missing, tmdb_id, tvdb_id,
                                                self.fanart_key).items():
                 out.setdefault(kind, url)
         return out
+
+    def _tvdb_id(self, tmdb_id: str) -> str:
+        """由 TMDB id 查 thetvdb id —— fanart.tv 的剧集接口只认 tvdb id。"""
+        try:
+            external = self._get(f"/tv/{tmdb_id}/external_ids") or {}
+        except Exception:
+            return ""
+        return str(external.get("tvdb_id") or "").strip()
 
     def read_image(self, url: str) -> Optional[bytes]:
         return download_bytes(url, self.opener)
@@ -2590,10 +2722,13 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                          "③ 徽标 → logo.png；"
                                          "④ 剧集缩略图 → 单集剧照，写成与该集视频同名的 .jpg（要求该集存在 NFO）；"
                                          "⑤ 横幅图 → banner.jpg；⑥ 光盘图 → disc.png；"
-                                         "⑦ 透明艺术图 → clearart.png；⑧ 横版缩略图 → landscape.jpg。"
-                                         "季目录也会写 banner.jpg 与 landscape.jpg（与剧集根目录同图）。"
-                                         "季海报不单独成项，跟随「海报」一起处理：**只写该季目录下的 poster.jpg**，"
-                                         "不会写到剧集根目录、也不会把各季海报堆在一起；"
+                                         "⑦ 透明艺术图 → clearart.png；⑧ 缩略图 → thumb.jpg，"
+                                         "并额外写一份 landscape.jpg（同名别名）。"
+                                         "季图片与 MP 官方保持一致，**两处都写**："
+                                         "该季目录内写通用名（poster.jpg / banner.jpg / thumb.jpg），"
+                                         "剧集根目录同时写一份 seasonNN-poster.jpg（季 0 特别篇写 "
+                                         "season-specials-poster.jpg）—— 兼容只认根目录命名的服务器；"
+                                         "根目录副本不带别名。"
                                          "某一季在线没有海报时会明确标注缺失，绝不用其它季或剧集海报顶替。"
                                          "全部不选 = 不处理任何图片（等于关掉图片处理，不会偷偷回退成全选）。"
                                          "判定沿用与 NFO 相同的「一致才跳过」逻辑：先比对本地图与在线图，"

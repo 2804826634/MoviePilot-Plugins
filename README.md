@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.7.4-blue)
+![version](https://img.shields.io/badge/version-1.7.6-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -73,7 +73,7 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 
 ## 图片补全
 
-### 支持的全部类型（8 类 + 季海报）
+### 支持的全部类型（8 类 + 季图）
 
 落盘命名遵循 **MP / Kodi / Jellyfin 三者共同认可**的约定（对照 MP `app/chain/media.py` 的
 `IMAGE_ALIASES`、`ScrapingMetadata` 与季目录命名规则实现）：
@@ -83,14 +83,29 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 | 海报（poster） | `poster.jpg` | 电影、剧集目录 | TMDB `posters` |
 | 背景图（backdrop） | `backdrop.jpg` **+** `fanart.jpg` | 电影、剧集目录 | TMDB `backdrops` |
 | 徽标（logo） | `logo.png` | 电影、剧集目录 | TMDB `logos` |
-| 剧集缩略图（thumb） | `<视频文件名>.jpg` | 单集（需该集有 NFO） | TMDB `stills` |
-| 横幅图（banner） | `banner.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviebanner` / `tvbanner` |
-| 光盘图（disc） | `disc.png` | 电影、剧集目录 | **fanart.tv** `moviedisc` |
+| 缩略图（thumb） | `thumb.jpg` **+** `landscape.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviethumb` / `tvthumb` / `seasonthumb` |
+| 横幅图（banner） | `banner.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviebanner` / `tvbanner` / `seasonbanner` |
+| 光盘图（disc） | `disc.png` | **仅电影目录** | **fanart.tv** `moviedisc` |
 | 透明艺术图（clearart） | `clearart.png` | 电影、剧集目录 | **fanart.tv** `hdmovieclearart` 等 |
-| 横版缩略图（landscape） | `landscape.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviethumb` / `tvthumb` |
-| 季海报 | **`<季目录>/poster.jpg`（只此一处）** | 季 | TMDB `posters`（**跟随「海报」一起处理，不单独成项**） |
+| 单集剧照（thumb） | `<视频文件名>.jpg` | 单集（需该集有 NFO） | TMDB `stills` |
+| 季图 | **两处都写**：`<季目录>/poster.jpg` + `<剧集根目录>/seasonNN-poster.jpg` | 季 | TMDB `posters`（**跟随「海报」一起处理，不单独成项**） |
 
-> **季海报的落盘规则（v1.7.0 起）**：一季一图、各归其位 —— 只写在该季自己的目录里，统一命名为 `poster.jpg`；**不再往剧集根目录写 `seasonNN-poster.jpg`**（那会把各季海报堆到同一个目录）。旧版可能已经在剧集根目录留下了这类文件，**插件完全不理会它们**（不检测、不删除、不告警，当它不存在）—— 真正被读取的是各季目录里的 `poster.jpg`，留着不影响使用。
+> **命名与 MP 官方的关系（v1.7.5 起严格对齐）**：本插件的类型集合与文件名，逐项对照 MP 的
+> `app/chain/media.py`（`IMAGE_ALIASES`、各 `ScrapingTarget` 的允许集合）与其官方测试
+> `tests/test_mediascrape.py` 实现：
+> - MP 的 `IMAGE_ALIASES` 规定 `backdrop ⇄ fanart`、`thumb ⇄ landscape` 互为别名（同一张图写两个名），
+>   所以 `thumb.jpg` 与 `landscape.jpg` 是**同一张图的两份副本**，`backdrop.jpg` 与 `fanart.jpg` 同理。
+> - MP 的 `tv`（剧集）允许集合里**没有 disc**，所以剧集目录不写 `disc.png`；只有电影写。
+> - MP 的季图片类型是 `poster / backdrop / banner / thumb / landscape`。其中 **季 backdrop 没有任何数据源**
+>   （TMDB 的季图片接口只返回 `posters`，fanart 的季接口只有 `seasonposter / seasonbanner / seasonthumb`），
+>   写了也是空转，所以本插件不列它。
+
+> **季图的落盘规则（v1.7.6 起完全对齐 MP）**：刮某一季时**两处都写**，与 MP 的 `_get_target_fileitems_and_paths` 行为一致 —— 该季自己的目录内写通用名（`poster.jpg` / `banner.jpg` / `thumb.jpg` + `landscape.jpg` 别名，Jellyfin/Kodi 读这个），**同时**在剧集根目录写 `season01-poster.jpg` / `season01-banner.jpg` / `season01-thumb.jpg`（兼容只认根目录 `seasonNN-` 命名的服务器）。
+>
+> 季 0（特别篇）在根目录写作 `season-specials-poster.jpg` —— 与 MP 的 `TmdbScraper.get_season_poster` 及 `FanartModule` 的写法一致。
+>
+> **根目录副本不带别名**：MP 的 `_expand_with_aliases` 遇到 `season` 前缀会直接跳过，所以根目录只会出现 `season01-poster/-banner/-thumb`，不会有 `season01-fanart.jpg` 或 `season01-landscape.jpg`。本插件保持一致。
+>
 > 某一季在线没有海报时会**明确标注缺失**（报告里显示「N 季在线没有海报，已跳过」），并且**绝不回退**用剧集海报或其它季的海报顶替。
 
 ### fanart.tv 那几类怎么配置
@@ -367,15 +382,16 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 无需联网、无需 TMDB Key，纯标准库：
 
 ```bash
-python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季海报落位）
-python tests/_self_test_plugin.py   # 插件面 181 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试/季海报落盘规则）
+python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季图双落点）
+python tests/_self_test_plugin.py   # 插件面 195 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试/MP 图片类型与命名对齐）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
 二次运行幂等（零写入）、保护字段生效、`gapfill` 模式不替换、表单控件与默认配置一一对应、端到端出报告并发通知；
-图片部分另外覆盖：缺失补齐、`fanart` 别名同内容、季海报只落季目录、单集缩略图命名、
+图片部分另外覆盖：缺失补齐、`fanart` 别名同内容、季图两处都写（季目录通用名 + 剧集根目录 seasonNN 副本）、单集缩略图命名、
 指纹匹配零下载幂等、错图被替换且原图入备份、`image_mode=missing/off` 行为、
-`lockdata` 连图片一起锁、TMDB 选图策略（语言 → 分辨率 → 评分）、尺寸档位按类型区分。
+`lockdata` 连图片一起锁、TMDB 选图策略（语言 → 分辨率 → 评分）、尺寸档位按类型区分、
+与 MP 官方的类型集合/文件名逐项对齐（剧集不写 disc、thumb 与 landscape 成对、季图双落点、特别篇 season-specials-poster）。
 
 ---
 
@@ -383,7 +399,7 @@ python tests/_self_test_plugin.py   # 插件面 181 项断言（伪造 MP 宿主
 
 - **电影**（`movie.nfo` / 同名 NFO）：`title`、`originaltitle`、`plot`、`tagline`、`year`、`premiered`、`runtime`、`mpaa`、`rating`、`genre`、`studio`、`country`、`director`、`credits`、`actor`，以及 `uniqueid[tmdb]` / `tmdbid`
 - **剧集**：`tvshow.nfo`、`season.nfo`、单集 NFO（`episodedetails`）
-- **图片**：`poster`（海报）、`backdrop`（背景图，含 `fanart` 别名）、`logo`（徽标）、`thumb`（剧集缩略图）、季海报（只在季目录内）
+- **图片**：`poster`（海报）、`backdrop`（背景图，含 `fanart` 别名）、`logo`（徽标）、`thumb`（缩略图，含 `landscape` 别名；单集为 `<视频文件名>.jpg`）、`banner`、`clearart`、`disc`（仅电影）、季图（季目录通用名 + 剧集根目录 seasonNN 副本）
 
 > **为什么目录里会有几张「看起来一样」的图？** 这是正常的，不是写重复了：
 >
@@ -462,11 +478,15 @@ v1.4.3 起会主动识别并清除这类脏值 —— 只要某个字段里存�
 
 ## 已知限制
 
-- **不提供 banner / clearart / discart / landscape**：这些画集 TMDB 没有，只有 fanart.tv 提供，需要额外申请其 API Key，不在本插件范围内。所以本插件是「补齐 + 纠错」，不是「全画集刮削」，可以和 fanart.tv 类工具并存。
+- **banner / clearart / disc / thumb(landscape) 依赖 fanart.tv**：这几类 TMDB 没有，只有 fanart.tv 提供。
+  插件会**自动沿用 MoviePilot 的 `FANART_API_KEY`**（MP 自带默认值），所以一般不用额外配置；
+  但需要 TMDB API Key 走直连通道（复用宿主刮削通道时拿不到这几类）。**季 backdrop 不建议期待**：
+  TMDB 的季图片接口只返回 `posters`，fanart 的季接口只有 `seasonposter/seasonbanner/seasonthumb`，
+  没有数据源能提供季 backdrop，插件也已不列它。
 - **剧集缩略图要求该集存在 NFO**：本插件以 NFO 为扫描入口，没有 NFO 的集不会被处理（电影/剧集/季同理）。
 - **`HostProvider`（复用 MP 刮削通道）能力有限**：只有 MoviePilot 里也没配到可用 TMDB Key 时才会走它；
   字段映射在不同 MP 版本上未逐一验证，属「尽力而为」，且图片只能取到海报与背景图
-  （`MediaInfo.poster_path` / `backdrop_path`），徽标 / 剧集缩略图 / 季海报拿不到。
+  （`MediaInfo.poster_path` / `backdrop_path`），徽标 / 缩略图 / 季图片拿不到。
 - **首轮图片有流量开销**：库里已有图片需要下载后才能判定是否一致；之后靠指纹清单零下载。
   库特别大时，可以先把「媒体库目录」填成某个子目录分批跑，或先设 `image_mode=missing` 只补空缺。
 - **图片下载依赖 `image.tmdb.org`**：国内直连经常超时。插件会自动沿用 MoviePilot 的

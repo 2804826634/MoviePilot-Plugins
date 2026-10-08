@@ -100,7 +100,9 @@ docker restart moviepilot-v2
 | --- | --- |
 | 市场里看不到插件 | `PLUGIN_MARKET` 没生效（改完要重启容器）；仓库不是 public；容器访问不了 raw.githubusercontent.com，配 `PROXY_HOST` 或 `GITHUB_TOKEN` |
 | **插件图标显示成默认的拼图块** | MP 是把 `package.v2.json` 里的 `icon` 字段**原样交给浏览器**加载的（服务端不代理图标），所以 raw.githubusercontent.com 在国内被挡时，市场列表能刷出来、图标却加载不出来。v1.7.1 起图标改用 **jsDelivr CDN**（一般可直连）。若仍不显示：① 插件市场点「刷新」让 MP 重新读取；② 浏览器硬刷新（Ctrl+F5）；③ 直接在浏览器打开那个图标链接确认能否访问，打不开说明该 CDN 也被挡，换成自己的图床地址即可 |
-| 目录里几张图内容一模一样（如 `backdrop.jpg` / `fanart.jpg` / `landscape.jpg`） | **属正常，不是写重复**：① `fanart.jpg` 是 `backdrop.jpg` 的**别名**，同一张背景图的两套文件名，兼容不同媒体服务器；② `landscape.jpg`（横版缩略图）取自 fanart.tv，其 `moviethumb`/`tvthumb` **常与背景图是同一张**。不想留这么多份，就在「处理的图片类型」里取消勾选「横版缩略图」 |
+| 目录里几张图内容一模一样（如 `backdrop.jpg` / `fanart.jpg` / `thumb.jpg` / `landscape.jpg`） | **属正常，不是写重复**：① `fanart.jpg` 是 `backdrop.jpg` 的**别名**；② `landscape.jpg` 是 `thumb.jpg` 的**别名**（MP 的 `IMAGE_ALIASES` 规定 `backdrop⇄fanart`、`thumb⇄landscape` 互为别名，同一张图写两个名以兼容不同媒体服务器）。不想留这么多份，就在「处理的图片类型」里取消勾选对应项 |
+| 剧集目录里没有 `disc.png` | **v1.7.5 起不再写，这是对的**：MP 的 `tv`（剧集）允许集合里**没有 disc**，只有电影有。剧集写 disc 属于多余 |
+| 季目录里没有 `backdrop.jpg` | **正常**：TMDB 的季图片接口只返回 `posters`，fanart.tv 的季接口只有 `seasonposter` / `seasonbanner` / `seasonthumb` —— **没有任何数据源能提供季 backdrop**，所以插件不列它（MP 的 season 配置项里虽列了 backdrop，同样取不到图） |
 | 图标是破图 | 属于正常降级，不影响功能；确认 `package.v2.json` 里 `icon` 的 URL 可访问 |
 | **日志出现 `[Errno 2] No such file or directory: 'xxx.jpg.nfgpart' -> 'xxx.jpg'`** | v1.7.1 及更早的 bug：原子写入用的**临时文件名固定**（`xxx.nfgpart`），并发扫描时同一路径被两个任务同时写、互相把临时文件踩掉。v1.7.2 起临时名带上 **进程 + 线程 + 随机数** 保证唯一，并对写入失败**自动重试一次**；同时对扫描到的 NFO **按真实路径去重** —— 库里有硬链接/软链接、或同一 NFO 落在多个媒体库目录下时，旧版会把它算两遍（既会撞车、计数也会翻倍）。升级即修好，无需手工处理 |
 | 扫描到 0 个 NFO | `paths` 填的是容器内路径（如 `/media/link/电影`），不是宿主机路径；确认该目录在容器里存在 |
@@ -137,8 +139,8 @@ docker restart moviepilot-v2
 | 剧集缩略图（单集图）没生成 | 该集必须有 NFO —— 本插件以 NFO 为扫描入口；另外它需要 TMDB API Key（宿主通道不提供剧照） |
 | 徽标 logo 没生成 | 同上，TMDB 的 logo 要直连 API；且 `image_kinds` 要含 `logo` |
 | 改了画质档后图片被整批重下 | **预期行为**：画质档位改变请求 URL，指纹随之失效。要么接受一次重下，要么先删掉 `image_manifest.json` 重新建立 |
-| 季海报只出现在一个地方 | **v1.7.0 起只写 `<季目录>/poster.jpg`**（一季一图、各归其位），不再往剧集根目录写 `seasonNN-poster.jpg` |
-| 剧集根目录残留一堆 `seasonNN-poster.jpg` | v1.7.0 起不再产生，旧版写下的会留着。**插件完全不理会它们**（不检测、不删除、不告警）—— 真正被读取的是各季目录里的 `poster.jpg`，留着不影响使用，可以不用管。若想眼不见为净，自行清理：`find <媒体库目录> -maxdepth 3 -name 'season*-poster.jpg' -delete` |
+| 季图出现在两个地方 | **v1.7.6 起与 MP 官方一致：两处都写** —— 该季目录内写通用名 `poster.jpg`（Jellyfin/Kodi 读这个），同时在剧集根目录写 `season01-poster.jpg`（兼容只认根目录 `seasonNN-` 命名的服务器）。两份内容相同，同一次下载只取一次图 |
+| 剧集根目录出现 `seasonNN-poster.jpg` 等文件 | **这是正常的**（v1.7.6 起对齐 MP 的双落点规则，主动写入）。除 poster 外还有 `seasonNN-banner.jpg` / `seasonNN-thumb.jpg`。**不带别名**：不会出现 `seasonNN-fanart.jpg` 或 `seasonNN-landscape.jpg`（与 MP 的别名跳过规则一致）。不想要根目录副本时，在「处理的图片类型」里取消勾选对应类型即可 |
 | 某季在线没有海报 | **明确标注缺失**（报告里「N 季在线没有海报，已跳过」+ 明细里一条「跳过（在线无此图）」），并且**绝不回退**用剧集海报或别的季的海报顶替 |
 | 想知道某张图来自哪个 URL | 打开 `image_manifest.json`（插件数据目录内，或 CLI 的 `<root>/.nfo-backup/image_manifest.json`），按路径查 |
 

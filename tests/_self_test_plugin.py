@@ -14,6 +14,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Dict
 
 HERE = Path(__file__).parent
 FIX = HERE / "_fixture" / "媒体库"
@@ -146,11 +147,11 @@ check("图片类型选项为中文，并标注落盘文件名",
       all(f"'title': '{title}'" in form_json for title in
           ("海报（poster.jpg）", "背景图（backdrop.jpg + fanart.jpg）",
            "徽标（logo.png）", "剧集缩略图（单集剧照 → 与视频同名的 .jpg）")))
-check("图片说明里写全了落盘文件名，并写明季海报只写季目录",
+check("图片说明里写全了落盘文件名，并写明季图两处都写（对齐 MP）",
       all(name in form_json for name in
           ("poster.jpg", "backdrop.jpg", "fanart.jpg", "logo.png"))
-      and "只写该季目录下的 poster.jpg" in form_json
-      and "seasonNN-poster.jpg" not in form_json)
+      and "seasonNN-poster.jpg" in form_json
+      and "两处都写" in form_json)
 check("图片类型默认全选", sorted(defaults["image_kinds"]) == sorted(module.IMAGE_KINDS))
 check("图片类型已扩到 8 类，且标注了数据来源（TMDB + fanart.tv）",
       all(f"'title': '{t}'" in form_json for t in
@@ -772,9 +773,8 @@ xiang_season, _ = xiang_engine.resolve_season_episode(xiang_loaded, "season")
 check("① 中文目录「第一季」解析为第 1 季（不再是未知 → 0）", xiang_season == "1", str(xiang_season))
 xiang_names = {path.name for _, path in
                module.image_targets(xiang_loaded, {"poster"}, season=xiang_season)}
-check("② 季海报目标名就是 poster.jpg（且不产生任何 seasonNN-poster 变体）",
-      xiang_names == {"poster.jpg"}
-      and not any(n.startswith("season") and "poster" in n for n in xiang_names),
+check("② 季图两处都写：季目录 poster.jpg + 剧集根目录 season01-poster.jpg（对齐 MP）",
+      xiang_names == {"poster.jpg", "season01-poster.jpg"},
       str(sorted(xiang_names)))
 
 # 季号确实解析不出来时：宁可不写季专用名，也不写 season00
@@ -786,7 +786,7 @@ check("③ 季号未知时跳过季专用文件名（只留季目录里的 poste
 
 print()
 print("=" * 70)
-print("季海报落盘规则：一季一图、各归其位（用户明确要求）")
+print("季图落盘规则：与 MP 一致 —— 季目录通用名 + 剧集根目录 seasonNN 副本")
 print("=" * 70)
 season_root = DATA_PATH / "seasonlib"
 show_dir = season_root / "电视剧" / "某剧 (2016) {tmdbid=66732}"
@@ -828,32 +828,38 @@ def root_season_posters():
                   if p.name.startswith("season") and p.name.endswith("-poster.jpg"))
 
 
-# 正常匹配到在线季海报 → 只写季目录里那份
+# 正常匹配到在线季海报 → 两处都写（与 MP 的 _get_target_fileitems_and_paths 一致）
 report_a = run_season("a")
-check("① 季海报写入季目录：Season 01/poster.jpg",
+check("① 季图写入季目录：Season 01/poster.jpg",
       (season_dir / "poster.jpg").exists(), str(sorted(p.name for p in season_dir.iterdir())))
-check("② 剧集根目录里不会出现 seasonNN-poster.jpg（不再集中堆放）",
-      root_season_posters() == [], str(root_season_posters()))
+check("② 同时写入剧集根目录：season01-poster.jpg（对齐 MP 的双落点）",
+      root_season_posters() == ["season01-poster.jpg"], str(root_season_posters()))
+check("② 两份内容一致（同一张在线图，只下载一次）",
+      (season_dir / "poster.jpg").read_bytes() == (show_dir / "season01-poster.jpg").read_bytes())
 
-# 旧版残留（剧集目录下的 seasonNN-poster.jpg）：新版**完全不检测、不处理、不告警**，
-# 当它不存在 —— 照样正常写季目录的 poster.jpg，且残留文件原样不动。
-legacy_file = show_dir / "season01-poster.jpg"
-if legacy_file.exists():
-    legacy_file.unlink()
-shutil.copy(FIX.parent / "images" / "poster_wrong.png", legacy_file)
-legacy_before = legacy_file.read_bytes()
+# 幂等：再跑一次不该重复写（指纹清单命中）
+report_a2 = run_season("a")
+check("② 二次运行幂等：两处都已存在且与在线一致 → 零写入",
+      (show_dir / "season01-poster.jpg").exists()
+      and report_a2.images_written == 0, f"written={report_a2.images_written}")
+
+# 重置：清掉两处，让后续用例从干净状态开始
 (season_dir / "poster.jpg").unlink(missing_ok=True)
-report_b = run_season("b")
-check("③ 存在旧版残留时，仍正常写入季目录 poster.jpg（互不干扰）",
-      (season_dir / "poster.jpg").exists(), str(sorted(p.name for p in season_dir.iterdir())))
-check("③ 旧版残留文件被完全无视：内容原样、报告里也不出现该概念",
-      legacy_file.exists() and legacy_file.read_bytes() == legacy_before
-      and not hasattr(report_b, "legacy_alias"),
-      f"legacy_exists={legacy_file.exists()}")
-legacy_file.unlink()
+(show_dir / "season01-poster.jpg").unlink(missing_ok=True)
+
+# 季 0（特别篇）：根目录副本按 MP 的写法用 season-specials-poster
+special_dir = show_dir / "Specials"
+special_dir.mkdir(parents=True, exist_ok=True)
+special_nfo = module.NfoFile(path=special_dir / "season.nfo", media_type="season",
+                             tree=ET.ElementTree(ET.fromstring(
+                                 "<season><title>特别篇</title><season>0</season></season>")))
+special_names = {path.name for _, path in module.image_targets(special_nfo, {"poster"}, season="0")}
+check("⑤ 特别篇（季 0）根目录副本写成 season-specials-poster.jpg（与 MP 一致）",
+      "season-specials-poster.jpg" in special_names and "season00-poster.jpg" not in special_names,
+      str(sorted(special_names)))
+shutil.rmtree(special_dir, ignore_errors=True)
 
 # 该季在线没有任何图片素材 → 明确标注缺失，且绝不回退用剧集/别季海报
-(season_dir / "poster.jpg").unlink()
 report_c = run_season("c", cache=season_cache_none)
 check("④ 该季在线无海报时明确标注缺失（不是静默跳过）",
       report_c.images_missing >= 1, f"images_missing={report_c.images_missing}")
@@ -888,6 +894,18 @@ try:
         "moviebanner": [{"url": "http://a/b_en.jpg", "lang": "en", "likes": "5"},
                         {"url": "http://a/b_zh.jpg", "lang": "zh", "likes": "1"}],
         "moviedisc": [{"url": "http://a/d1.png", "lang": "00", "likes": "9"}],
+        "seasonposter": [
+            {"url": "http://a/s1p.jpg", "lang": "zh", "likes": "3", "season": "1"},
+            {"url": "http://a/s2p.jpg", "lang": "zh", "likes": "9", "season": "2"},
+        ],
+        "seasonthumb": [
+            {"url": "http://a/s1t.jpg", "lang": "zh", "likes": "4", "season": "1"},
+            {"url": "http://a/s1t_en.jpg", "lang": "en", "likes": "40", "season": "1"},
+            {"url": "http://a/s2t.jpg", "lang": "zh", "likes": "8", "season": "2"},
+        ],
+        "seasonbanner": [
+            {"url": "http://a/s1b.jpg", "lang": "zh", "likes": "2", "season": "1"},
+        ],
     }
 
     class _FakeFanart:
@@ -934,6 +952,39 @@ try:
           module.fanart_image_urls({"banner"}, "", "", "KEY") == {})
     check("不需要 fanart 的类型（如海报）不会触发查询",
           module.fanart_image_urls({"poster"}, "812", "", "KEY") == {})
+
+    # 季级别：seasonposter / seasonbanner / seasonthumb 是带 season 字段的数组，必须按季筛选
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        s1 = module.fanart_season_image_urls({"poster", "banner", "thumb"}, "1", "355730", "KEY")
+    finally:
+        module.urllib.request.urlopen = _orig_urlopen
+    check("季图片按季号筛选：第 1 季取到 s1 的图，不串到第 2 季",
+          s1.get("poster") == "http://a/s1p.jpg"
+          and s1.get("banner") == "http://a/s1b.jpg"
+          and s1.get("thumb") == "http://a/s1t.jpg", str(s1))
+    check("季图片语言偏好同样生效（zh 优先于票数更高的 en）",
+          s1.get("thumb") == "http://a/s1t.jpg", str(s1))
+
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        s2 = module.fanart_season_image_urls({"poster", "thumb"}, "2", "355730", "KEY")
+    finally:
+        module.urllib.request.urlopen = _orig_urlopen
+    check("第 2 季只取 s2 的图（s1 的不会被当成 s2 的）",
+          s2.get("poster") == "http://a/s2p.jpg" and s2.get("thumb") == "http://a/s2t.jpg",
+          str(s2))
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        s1_padded = module.fanart_season_image_urls({"poster"}, "01", "355730", "KEY")
+    finally:
+        module.urllib.request.urlopen = _orig_urlopen
+    check("季号写法兼容：'01' 与 '1' 等价",
+          s1_padded.get("poster") == "http://a/s1p.jpg", str(s1_padded))
+    check("季图没有 tvdbid 时不发请求",
+          module.fanart_season_image_urls({"thumb"}, "1", "", "KEY") == {})
+    check("季图请求指向 fanart.tv 的剧集接口",
+          "/v3/tv/355730?api_key=KEY" in captured.get("url", ""), captured.get("url", ""))
 finally:
     module.mp_setting = _orig_mp
 check("恢复后语言偏好回到默认 zh,en", module.fanart_lang_order() == ["zh", "en"])
@@ -1117,11 +1168,12 @@ check("未知画质档回退 standard", module.image_size_for("bogus", "poster")
 movie_nfo = module.load_nfo(FIX / "电影" / "星际穿越 (2014)" / "movie.nfo")
 movie_targets = {(spec.kind, spec.name) for spec, _ in
                  module.image_targets(movie_nfo, set(module.IMAGE_KINDS))}
-check("电影图片目标 = poster / backdrop / fanart / logo + 新增 4 类",
+check("电影图片目标 = poster / backdrop / fanart / logo / disc / banner / clearart / thumb / landscape",
       movie_targets == {("poster", "poster.jpg"), ("backdrop", "backdrop.jpg"),
                         ("backdrop", "fanart.jpg"), ("logo", "logo.png"),
-                        ("banner", "banner.jpg"), ("disc", "disc.png"),
-                        ("clearart", "clearart.png"), ("landscape", "landscape.jpg")})
+                        ("disc", "disc.png"), ("banner", "banner.jpg"),
+                        ("clearart", "clearart.png"),
+                        ("thumb", "thumb.jpg"), ("thumb", "landscape.jpg")})
 check("新增类型默认全选（8 类都在 IMAGE_KINDS 里）",
       len(module.IMAGE_KINDS) == 8
       and set(module.IMAGE_KINDS) == {"poster", "backdrop", "logo", "thumb",
@@ -1131,16 +1183,57 @@ check("fanart 键名映射与 MoviePilot 的 FanartModule 一致",
       and module.FANART_KEYS["disc"] == ("moviedisc",)
       and "hdmovieclearart" in module.FANART_KEYS["clearart"]
       and "moviethumb" in module.FANART_KEYS["landscape"])
+check("季专用 fanart 键与 MP 的 seasonposter/seasonbanner/seasonthumb 对齐",
+      module.FANART_SEASON_KEYS["poster"] == ("seasonposter",)
+      and module.FANART_SEASON_KEYS["banner"] == ("seasonbanner",)
+      and module.FANART_SEASON_KEYS["thumb"] == ("seasonthumb",))
+
+# 剧集：MP 的 tv 允许集合里**没有 disc**，所以 image_targets 不该产出 disc.png
+tvshow_nfo = module.load_nfo(FIX / "电视剧" / "怪奇物语 (2016)" / "tvshow.nfo")
+tvshow_specs = {(spec.kind, spec.name) for spec, _ in
+                module.image_targets(tvshow_nfo, set(module.IMAGE_KINDS))}
+check("剧集根目录不写 disc.png（与 MP 的 tv 允许集合一致）",
+      ("disc", "disc.png") not in tvshow_specs
+      and ("thumb", "thumb.jpg") in tvshow_specs
+      and ("thumb", "landscape.jpg") in tvshow_specs,
+      str(sorted(tvshow_specs)))
+check("剧集根目录其余类型齐全",
+      tvshow_specs == {("poster", "poster.jpg"), ("backdrop", "backdrop.jpg"),
+                       ("backdrop", "fanart.jpg"), ("logo", "logo.png"),
+                       ("banner", "banner.jpg"), ("clearart", "clearart.png"),
+                       ("thumb", "thumb.jpg"), ("thumb", "landscape.jpg")})
+
 season_tree = ET.ElementTree(ET.fromstring("<season><season>1</season></season>"))
 season_nfo = module.NfoFile(path=Path("电视剧") / "怪奇物语 (2016)" / "Season 01" / "season.nfo",
                             media_type="season", tree=season_tree)
-season_targets = module.image_targets(season_nfo, {"poster"})
-check("季海报**只**落季目录 poster.jpg（不再往剧集根目录写 seasonNN-poster.jpg）",
-      len(season_targets) == 1
-      and season_targets[0][1].name == "poster.jpg"
-      and season_targets[0][1].parent.name == "Season 01", str(season_targets))
+season_targets = module.image_targets(season_nfo, set(module.IMAGE_KINDS))
+
+# 每个非别名季图类型都产出两个落点：剧集根目录 seasonNN-xxx + 季目录通用名
+season_by_loc: Dict[str, list] = {"root": [], "season": []}
+for spec, path in season_targets:
+    where = "root" if path.parent.name == "怪奇物语 (2016)" else "season"
+    season_by_loc[where].append((spec.kind, spec.name))
+check("季图两处都写：剧集根目录 + 季目录（对齐 MP）",
+      len(season_by_loc["season"]) == 4 and len(season_by_loc["root"]) == 3,
+      f"season={season_by_loc['season']} root={season_by_loc['root']}")
+check("季目录内的通用名 = poster / banner / thumb / landscape（对齐 MP 的 season）",
+      {(k, n) for k, n in season_by_loc["season"]}
+      == {("poster", "poster.jpg"), ("banner", "banner.jpg"),
+          ("thumb", "thumb.jpg"), ("thumb", "landscape.jpg")},
+      str(sorted(season_by_loc["season"])))
+check("剧集根目录的副本 = season01-poster / -banner / -thumb（不带别名，与 MP 一致）",
+      {(k, n) for k, n in season_by_loc["root"]}
+      == {("poster", "poster.jpg"), ("banner", "banner.jpg"), ("thumb", "thumb.jpg")},
+      str(sorted(season_by_loc["root"])))
+check("根目录副本的文件名确实是 seasonNN- 形式",
+      sorted(p.name for _, p in season_targets if p.parent.name == "怪奇物语 (2016)")
+      == ["season01-banner.jpg", "season01-poster.jpg", "season01-thumb.jpg"],
+      str(sorted(p.name for _, p in season_targets if p.parent.name == "怪奇物语 (2016)")))
+season_poster_only = module.image_targets(season_nfo, {"poster"})
 check("按 kinds 过滤生效（只要 poster 时不产出 backdrop）",
-      all(spec.kind == "poster" for spec, _ in season_targets))
+      {(s.kind, p.name) for s, p in season_poster_only}
+      == {("poster", "poster.jpg"), ("poster", "season01-poster.jpg")},
+      str(sorted((s.kind, p.name) for s, p in season_poster_only)))
 episode_tree = ET.ElementTree(ET.fromstring("<episodedetails><season>2</season></episodedetails>"))
 episode_nfo = module.NfoFile(path=Path("剧") / "Season 02" / "剧 - S02E03.nfo",
                              media_type="episodedetails", tree=episode_tree)
