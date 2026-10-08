@@ -210,7 +210,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.10.0"
+PLUGIN_VERSION = "1.10.1"
 # 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
 #
 # 三条约束（都踩过坑，别改回去）：
@@ -2575,6 +2575,13 @@ class Engine:
         self.manifest = ImageManifest(cfg.manifest_path)
         self._warned_junk: set = set()      # 脏值告警去重，避免刷屏
         self._lock = threading.Lock()       # 保护 _warned_junk 等并发共享状态
+        # 本次运行「已被认领 / 已处理」的图片：图片按**目录**共享（poster.jpg 等），
+        # 而一个目录里可能同时存在多份 NFO（例如 MP 写的 movie.nfo + 第三方工具写的
+        # 「片名 (年份).nfo」）。每份 NFO 都会各自走一遍图片比对，于是同一张图被
+        # 处理两次 —— 日志里出现两条一模一样的「图片替换」，并发时还会各下载、各写一次，
+        # images_written 也跟着翻倍。这里以「图片绝对路径」为键**在下载前先认领**，
+        # 重复的直接跳过；下载失败 / 被 NFO 锁定时会释放（v1.10.1）。
+        self._images_done: Dict[str, str] = {}
 
     def sanitize_remote(self, field: str, values: List[str]) -> List[str]:
         """护栏：拦掉「结构化对象被 str() 出来」的脏值。
@@ -2737,6 +2744,21 @@ class Engine:
             targets = [self.single_file] if self.single_file in targets or self.single_file.exists() else targets
         if self.cfg.max_files:
             targets = targets[: self.cfg.max_files]
+
+        # 一个目录里同时有多份「条目级」NFO 时（典型：MP 写的 movie.nfo + 第三方工具写的
+        # 「片名 (年份).nfo」），图片是按目录共享的，每份 NFO 都会各自走一遍图片比对 ——
+        # 提前说明一句，免得在日志里看到同一张图被处理两次而发懵。
+        # （单集 NFO 一个目录有很多份是正常的，这里按文件名排除掉，不参与统计。）
+        root_nfos: Dict[Path, List[str]] = {}
+        for path in targets:
+            if not re.search(r"[Ss]\d{1,2}[Ee]\d{1,3}", path.name):
+                root_nfos.setdefault(path.parent, []).append(path.name)
+        dup_dirs = {d: sorted(names) for d, names in root_nfos.items() if len(names) > 1}
+        if dup_dirs:
+            sample = "；".join(f"{d.name}（{'、'.join(names)}）"
+                               for d, names in list(sorted(dup_dirs.items()))[:5])
+            logger.info(f"有 {len(dup_dirs)} 个目录存在多份 NFO，图片每份只会处理一次（v1.10.1 起）："
+                        + sample + ("…" if len(dup_dirs) > 5 else ""))
 
         workers = max(1, int(self.cfg.concurrency or 1))
         pairs = [(path, next((r for r in self.cfg.roots if str(path).startswith(str(r))), path.parent))
@@ -2945,6 +2967,36 @@ class Engine:
         logger.info(f"已更新 {rel}：{', '.join(p[0] for p in plan)}")
 
     # ── 图片 ────────────────────────────────────────────────────────
+    def _image_key(self, path: Path) -> str:
+        """图片文件的去重键：优先 realpath（硬链接 / 软链接下也能认出同一张图）。"""
+        try:
+            return os.path.realpath(path)
+        except Exception:
+            return str(path)
+
+    def _image_claim(self, path: Path, url: str) -> bool:
+        """「认领」这张图：本次运行由我来处理它。
+
+        必须**先认领、再干活**（而不是干完再记账）：同一目录里的两份 NFO 会并发跑到
+        这里，只有两边都在下载前就记账，才能挡住重复下载 / 重复写入 ——
+        干完再记账的话，后一个任务早就把下载也启了（v1.10.0 及以前就是这样，
+        日志里出现两条一样的「图片替换」，而且文件被写两遍、images_written 翻倍）。
+
+        返回 True = 认领成功（继续处理）；False = 本次已被别的任务认领过（跳过）。
+        """
+        key = self._image_key(path)
+        with self._lock:
+            if key in self._images_done:
+                return False
+            self._images_done[key] = url
+            return True
+
+    def _image_release(self, path: Path) -> None:
+        """放弃认领 —— 下载失败 / 被 NFO 锁定这类「我没处理成」的情况要放开，
+        好让同一目录里另一份 NFO 仍有机会处理它。"""
+        with self._lock:
+            self._images_done.pop(self._image_key(path), None)
+
     def fetch_remote_images(self, nfo: NfoFile, kinds: set) -> Dict[str, str]:
         if not kinds or not hasattr(self.provider, "fetch_images"):
             return {}
@@ -3020,10 +3072,20 @@ class Engine:
                     self.__image_change(rel, "未比对", "跳过（在线无此图）", label,
                                         "在线该类型无图", "")
                 continue
+            # 同一张图本次运行已由「同目录的另一份 NFO」认领 → 不再重复比对：
+            # 否则日志里会冒出两条一模一样的「图片替换」，并发时还会重复下载与写入、
+            # 让 images_written 翻倍（v1.10.1）。认领必须在下载**之前**，
+            # 否则两个任务会同时通过检查（v1.10.0 及以前就是这样）。
+            if not self._image_claim(path, url):
+                logger.debug(f"{rel}：{path.name} 本次已由其它 NFO 处理，跳过重复处理")
+                self.__image_change(rel, "未比对", "跳过（本次已处理）", label,
+                                    "同一张图本次运行已处理过", url)
+                continue
             self.report.bump("images_scanned")
 
             # Kodi 的 lockdata 表示「整个条目不许改」，lockedfields 可按字段名锁单张图
             if locked is True or spec.kind.casefold() in locked_names:
+                self._image_release(path)      # 我没处理成，放开给同目录的其它 NFO
                 self.report.bump("skipped_locked")
                 self.__image_change(rel, "未比对", "跳过（NFO 锁定）", label,
                                     "lockdata / lockedfields", url)
@@ -3047,6 +3109,7 @@ class Engine:
                 cache[url] = reader(url) if callable(reader) else None
             data = cache[url]
             if not data:
+                self._image_release(path)      # 下载失败 → 放开，别堵住另一份 NFO
                 self.report.add_error(f"{rel}：图片下载失败（{spec.kind}）{url}")
                 continue
 

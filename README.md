@@ -2,7 +2,7 @@
 
 > 收录一个自用插件：**NFO 与图片差异比对**（NfoGapFill）。
 
-![version](https://img.shields.io/badge/version-1.10.0-blue)
+![version](https://img.shields.io/badge/version-1.10.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -19,7 +19,7 @@
 
 | 插件 ID | 名称 | 说明 | 版本 |
 | --- | --- | --- | --- |
-| [`NfoGapFill`](docs/NfoGapFill.md) | NFO 与图片差异比对 | 本地 NFO / 海报 / 背景图与在线元数据的**内容比对**：缺失补齐、不一致替换、一致跳过 | 1.10.0 |
+| [`NfoGapFill`](docs/NfoGapFill.md) | NFO 与图片差异比对 | 本地 NFO / 海报 / 背景图与在线元数据的**内容比对**：缺失补齐、不一致替换、一致跳过 | 1.10.1 |
 
 点击插件名看详细文档。
 
@@ -30,6 +30,7 @@
 
 ### 版本历史
 
+- [RELEASE v1.10.1](RELEASE_v1.10.1.md) —— 修「同一张图被处理两次」（同目录多份 NFO 时日志出现两条相同「图片替换」）
 - [RELEASE v1.10.0](RELEASE_v1.10.0.md) —— 中文海报 / 徽标按「简体 / 繁体」优先（简体设置不再选中繁体图）
 - [RELEASE v1.9.3](RELEASE_v1.9.3.md) —— 设置页「媒体库目录 / 排除路径」改为等宽（7:5 → 6:6）
 - [RELEASE v1.9.2](RELEASE_v1.9.2.md) —— 取消「写入前备份」+ 设置页排版重排（22 行 → 15 行）
@@ -61,7 +62,7 @@ MoviePilot-Plugins/
 │   ├── NfoGapFill.md
 │   └── DEPLOY.md
 ├── create_release.sh                  # 发版脚本（打 zip + 建 Release + 上传附件）
-└── RELEASE_v1.10.0.md / RELEASE_v1.9.3.md / RELEASE_v1.9.2.md / RELEASE_v1.9.1.md / RELEASE_v1.9.0.md / RELEASE_v1.8.7.md / RELEASE_v1.8.6.md / RELEASE_v1.8.5.md / RELEASE_v1.8.4.md / RELEASE_v1.8.3.md / RELEASE_v1.8.2.md / RELEASE_v1.8.1.md / RELEASE_v1.8.0.md / RELEASE_v1.7.8.md / RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
+└── RELEASE_v1.10.1.md / RELEASE_v1.10.0.md / RELEASE_v1.9.3.md / RELEASE_v1.9.2.md / RELEASE_v1.9.1.md / RELEASE_v1.9.0.md / RELEASE_v1.8.7.md / RELEASE_v1.8.6.md / RELEASE_v1.8.5.md / RELEASE_v1.8.4.md / RELEASE_v1.8.3.md / RELEASE_v1.8.2.md / RELEASE_v1.8.1.md / RELEASE_v1.8.0.md / RELEASE_v1.7.8.md / RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
 ```
 
 约定：
