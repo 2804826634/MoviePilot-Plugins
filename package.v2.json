@@ -45,19 +45,5 @@
     "history": {
       "v1.0.0": "初版：匹配失败判定（区分「确认不存在」与「查不到」）、三重证据特别篇识别（查无该集 + 文件名关键词 + 命中 Season 0 标题）、季/集修正与重新整理触发。**只改整理记录的季/集字段并调用 MP 官方 manual_transfer，不自行刮削、不写媒体元数据**"
     }
-  },
-  "SpecialsRelocate": {
-    "name": "特别篇归位",
-    "description": "自动比对本地集数与 TMDB 官方季集数，识别超出范围的剧集并判定特别篇，按 Plex/TMDB 规范移入 Season 00 并重编号。",
-    "labels": "文件整理,工具",
-    "version": "1.0.0",
-    "icon": "https://cdn.jsdelivr.net/gh/2804826634/MoviePilot-Plugins@main/icons/specialsrelocate.png",
-    "author": "peter_chen",
-    "level": 1,
-    "v3": false,
-    "release": false,
-    "history": {
-      "v1.0.0": "初版：超集识别（本地集数 > TMDB 官方季集数）、三重证据特别篇判定（文件名关键词 + 时长偏离 + Season 0 标题匹配）、Season 00 归位与重编号、附属文件按集号同步迁移、可选写 episode NFO"
-    }
   }
 }

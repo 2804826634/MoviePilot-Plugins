@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-生成两个特别篇插件的图标（512x512 RGBA PNG，无第三方依赖）。
+生成本仓库自研插件的图标（512x512 RGBA PNG，无第三方依赖）。
 
 风格沿用本仓库既有的 nfogapfill.png：蓝色->青色对角渐变的圆角方块 + 纯白符号。
 之所以本地手绘而不走 AI 生图：图标是几何色块，本地绘制结果确定、可复现、
-不消耗积分，且能保证两个插件与既有图标风格严格一致。
+不消耗积分，且能保证与既有图标风格严格一致。
 
-运行： python scripts/make_specials_icons.py
-输出： icons/specialsfixer.png、icons/specialsrelocate.png
+新增插件时在main() 的列表里加一行（name, 绘制函数）即可。
+
+运行： python scripts/make_plugin_icons.py
+输出： icons/specialsfixer.png
 """
 import math
 import struct
@@ -186,41 +188,9 @@ def draw_specialsfixer():
     return c.downsample(SS)
 
 
-def draw_specialsrelocate():
-    """特别篇归位：Season 01 目录 → 箭头 → Season 00 目录。"""
-    c = Canvas(SIZE * SS)
-    c.fill_gradient_rounded(C_TOP, C_BOTTOM, RADIUS * SS)
-
-    def s(v):
-        return v * SS
-
-    white = (255, 255, 255, 255)
-    W = 30 * SS
-
-    # 上层目录：Season 01（实线框）
-    top_y0, top_y1 = s(122), s(226)
-    c.stroke_rect(s(140), top_y0, s(372), top_y1, W, white, radius=16 * SS)
-    # 目录内的「集号条」：三条短横
-    for i, yy in enumerate((s(152), s(174), s(196))):
-        c.stroke_polyline([(s(176), yy), (s(336 - i * 18), yy)], W * 0.5, white, caps=True)
-
-    # 中间向下箭头：竖干 + 两个斜羽
-    c.stroke_polyline([(s(256), s(250)), (s(256), s(322))], W, white, caps=True)
-    c.stroke_polyline([(s(214), s(288)), (s(256), s(330))], W * 0.9, white, caps=True)
-    c.stroke_polyline([(s(298), s(288)), (s(256), s(330))], W * 0.9, white, caps=True)
-
-    # 下层目录：Season 00（双线框，强调「归位目标」）
-    bot_y0, bot_y1 = s(344), s(430)
-    c.stroke_rect(s(140), bot_y0, s(372), bot_y1, W, white, radius=16 * SS)
-    c.stroke_polyline([(s(176), s(387)), (s(336), s(387))], W * 0.62, white, caps=True)
-
-    return c.downsample(SS)
-
-
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for name, fn in (("specialsfixer", draw_specialsfixer),
-                     ("specialsrelocate", draw_specialsrelocate)):
+    for name, fn in (("specialsfixer", draw_specialsfixer),):
         canvas = fn()
         path = OUT_DIR / ("%s.png" % name)
         canvas.save(path)
