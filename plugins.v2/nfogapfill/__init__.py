@@ -143,7 +143,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import Event
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # ── MoviePilot 宿主环境探测：在 MP 里走宿主基类，在命令行里降级为普通类 ──
 IN_MOVIEPILOT = False
@@ -192,7 +192,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.8.3"
+PLUGIN_VERSION = "1.8.4"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -285,13 +285,6 @@ IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
 IMAGE_SOURCES: Tuple[str, ...] = ("tmdb", "fanart")
 IMAGE_SOURCE_CN = {"tmdb": "TMDB", "fanart": "fanart.tv"}
 
-# ── 无本语言海报时的回退顺序 ───────────────────────────────────────────
-# 第一优先级永远是**本语言**（= 插件的「元数据语言」配置，如 zh-CN）。
-# 本语言一张海报都没有时（TMDB 上很常见：老番 / 冷门片常没人上传中文海报），
-# 按这里的顺序继续挑。可选档位：
-#   textless  → 无文字版（iso_639_1 为空，纯画面、不带任何文字）
-#   en        → 英文标题
-#   original  → 原始语言标题（original_language，动漫多为日文）
 def image_source_order(raw: Any = None) -> List[str]:
     """把配置收敛成有序的来源列表，默认 `["tmdb", "fanart"]`。
 
@@ -312,6 +305,25 @@ def image_source_order(raw: Any = None) -> List[str]:
             seen.add(p)
             ordered.append(p)
     return ordered or list(IMAGE_SOURCES)
+
+
+# ── 配置值归一化：合法值原样返回，非法值回落到默认 ─────────────────────
+# 这三项在「构造 provider」与「构造 EngineConfig」两处都要用，且两处必须得到
+# 同一个结果（画质不一致会导致 provider 下载的尺寸与配置页显示的对不上）。
+# 集中在这里，避免同一个三元表达式在各处各写一遍、日后改漏一处。
+def normalize_quality(raw: Any) -> str:
+    """画质档：standard / original，非法值回落 standard。"""
+    return raw if raw in IMG_SIZES else "standard"
+
+
+def normalize_image_mode(raw: Any) -> str:
+    """图片处理模式：off / missing / sync，非法值回落 sync。"""
+    return raw if raw in (IMG_OFF, IMG_MISSING, IMG_SYNC) else IMG_SYNC
+
+
+def normalize_mode(raw: Any) -> str:
+    """NFO 处理模式：report / gapfill / sync / force，非法值回落 sync。"""
+    return raw if raw in ("report", "gapfill", "sync", "force") else "sync"
 
 UA = f"NfoGapFill/{PLUGIN_VERSION} (+MoviePilot plugin)"
 
@@ -393,6 +405,15 @@ def type_allowed(forced: Optional[str], media_type: str) -> bool:
     if forced == "tv":
         return media_type in ("tvshow", "season", "episodedetails")
     return True
+
+
+def describe_root_types(root_types: Dict[str, str]) -> str:
+    """把「目录 → 限定类型」渲染成一行可读文本。
+
+    插件写日志、CLI 写控制台都用它 —— 同一件事只留一份措辞，不会两边说法不一样。
+    """
+    return "，".join(f"{item} → {TYPE_TAG_CN.get(forced, forced)}"
+                    for item, forced in root_types.items())
 
 
 def image_host() -> str:
@@ -1449,11 +1470,13 @@ class TmdbProvider:
         self.language = language
         self.cert_country = (cert_country or "US").upper()
         self.cast_limit = cast_limit
-        self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
+        self.image_quality = normalize_quality(image_quality)
         # 图片来源优先级（默认 TMDB → fanart.tv）
         self.source_order = image_source_order(source_order)
-        # 类型 -> 「为什么没选到图」的原因（v1.8.0 后只有「在线没图」等少数情况）
-        self.lang_rejected: Dict[str, str] = {}
+        # 「在线确实一张图都没有」的类型集合。
+        # v1.8.0 起选不出图只剩这一种原因，所以这里只需记「哪些类型确实是空的」；
+        # 具体该怎么说、算不算缺失，由 Engine 决定（引擎不该读服务端的措辞）。
+        self.no_image_kinds: set = set()
         # 图片域名跟随宿主配置（国内直连 image.tmdb.org 经常超时，MP 允许换镜像）
         self.img_host = image_host()
         # 接口域名同理可覆盖（默认 api.themoviedb.org；被拦时可换 api.tmdb.org）
@@ -1721,7 +1744,7 @@ class TmdbProvider:
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
             else:
-                self.lang_rejected[kind] = "在线这类型确实一张图都没有（未写入）"
+                self.no_image_kinds.add(kind)
 
     def _fetch_fanart_images(self, tmdb_id: str, media_type: str, season: Optional[str],
                              kinds: Any, out: Dict[str, str]) -> None:
@@ -1781,7 +1804,7 @@ class HostProvider:
         self._chain = None
         self._failed = False
         self._opener_obj = None
-        self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
+        self.image_quality = normalize_quality(image_quality)
         self.cast_limit = cast_limit
         self.img_host = image_host()
 
@@ -2015,6 +2038,35 @@ class FileProvider:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 数据源工厂（插件与 CLI 共用）
+# ══════════════════════════════════════════════════════════════════════
+def log_pick_rule(language: str, order: Sequence[str]) -> None:
+    """打印「来源优先级 + 选图规则」两行。
+
+    插件与 CLI 共用同一份措辞 —— 以前两边各写一份，v1.8.x 改选图规则时
+    就必须记得同时改两处，漏一处就会出现「日志说的规则和实际行为不一致」。
+    """
+    logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
+    logger.info("选图规则：优先本语言（%s），本语言没有则按评分从全部候选里取"
+                % (language or "?"))
+
+
+def build_tmdb_provider(api_key: str, language: str = "zh-CN",
+                        proxy: str = "", cast_limit: int = 20,
+                        image_quality: str = "standard", concurrency: int = 1,
+                        source_order: Any = None) -> TmdbProvider:
+    """构造「TMDB 直连」数据源，顺带把来源优先级与选图规则写进日志。
+
+    插件与 CLI 走同一个入口，配置项到 provider 参数的映射只在这里定义一次。
+    """
+    order = image_source_order(source_order)
+    log_pick_rule(language, order)
+    return TmdbProvider(api_key, language, proxy or None, CERT_COUNTRY,
+                        cast_limit, normalize_quality(image_quality),
+                        concurrency=concurrency, source_order=order)
+
+
+# ══════════════════════════════════════════════════════════════════════
 # 引擎配置与报告
 # ══════════════════════════════════════════════════════════════════════
 @dataclass
@@ -2143,6 +2195,45 @@ class Report:
     def _needs_write(action: str) -> bool:
         """这条记录是否代表「会写盘」（演练 / 只报告模式下的待执行也算）。"""
         return bool(action) and not any(token in action for token in ("跳过", "未比对"))
+
+    def to_dict(self, *, rows: bool = False) -> Dict[str, Any]:
+        """报告的可序列化快照。
+
+        **三处出口共用这一份字段清单**：插件的 last_changes.json、插件数据目录里的
+        运行摘要、CLI 的 --json。以前每处各写一遍，结果同名字段出现两种键名
+        （`changed` / `changed_files`、`untouched` / `unchanged`），
+        调用方只能靠猜 —— 现在只有这里一处权威定义。
+
+        `rows=True` 时附带「按文件聚合的改动清单」（详情页表格用）。
+        """
+        data: Dict[str, Any] = {
+            "started": self.started,
+            "finished": self.finished,
+            "mode": self.mode,
+            "provider": self.provider,
+            "calls": self.calls,
+            "scanned": self.scanned,
+            "untouched": self.untouched,
+            "changed_files": self.changed_files,
+            "skipped_locked": self.skipped_locked,
+            "skipped_type": self.skipped_type,
+            "scrubbed": self.scrubbed,
+            "retried": self.retried,
+            "images_missing": self.images_missing,
+            "unresolved": self.unresolved,
+            "failed": self.failed,
+            "counts": dict(self.counts),
+            "applied": dict(self.applied),
+            "errors": list(self.errors),
+            "images_scanned": self.images_scanned,
+            "images_written": self.images_written,
+            "image_bytes": self.image_bytes,
+            "image_counts": dict(self.image_counts),
+            "image_applied": dict(self.image_applied),
+        }
+        if rows:
+            data["rows"] = self.change_rows()
+        return data
 
     def change_rows(self, limit: int = 200) -> List[Dict[str, Any]]:
         """按文件聚合「本次改了什么」，供插件详情页表格直接渲染。
@@ -2688,12 +2779,12 @@ class Engine:
         targets = image_targets(nfo, self.cfg.image_kinds, season=season)
         if not targets:
             return 0
-        # 清掉上一条目的语言拒绝记录，避免串味（provider 是复用的）
-        if hasattr(self.provider, "lang_rejected"):
-            self.provider.lang_rejected.clear()
+        # 清掉上一条目的「在线无图」记录，避免串味（provider 是复用的）
+        if hasattr(self.provider, "no_image_kinds"):
+            self.provider.no_image_kinds.clear()
         urls = self.fetch_remote_images(nfo, {spec.kind for spec, _ in targets})
-        rejected = getattr(self.provider, "lang_rejected", None) or {}
-        if not urls and not rejected:
+        no_image = getattr(self.provider, "no_image_kinds", None) or set()
+        if not urls and not no_image:
             # 一季可能在线什么素材都没有。以前这里直接返回什么都不记，
             # 于是「该季海报缺失」在输出里完全看不出来 —— 现在明确标注（且绝不回退）。
             if nfo.media_type == "season" and "poster" in self.cfg.image_kinds:
@@ -2712,22 +2803,23 @@ class Engine:
             label = f"[图片] {spec.kind} → {path.name}" + ("（别名）" if spec.alias else "")
             url = urls.get(spec.kind)
             if not url:
-                reason = rejected.get(spec.kind)
-                if reason:
-                    # 在线**有**这类型的图，但一张都不符合语言规则 → 明确说清是哪回事，
-                    # 否则用户只看到「没写海报」，不知道是有中文图之外的选择被主动放弃。
-                    logger.info(f"{rel}：{reason}")
-                    self.__image_change(rel, "未比对", "跳过（没有合适语言的图）",
-                                        label, reason, "")
-                    continue
-                # 在线没有这张图。**明确标记、绝不回退** ——
-                # 不能用「剧集海报」或「别的季的海报」来顶替某一季的海报。
+                # 季海报缺失要先判 —— 它是最常见也最需要说清的一种，
+                # 给的是「该季没有海报、不回退」的专属说明，比通用文案有用。
+                # （此前「在线无图」的通用分支排在前面，把季海报这条给挡掉了，
+                #   顺带导致 images_missing 计数漏记。）
                 if spec.kind == "poster" and nfo.media_type == "season":
                     self.report.bump("images_missing")
                     logger.info(f"{rel}：该季在线没有「海报」，未写入 {path}"
                                 f"（不回退其它季或剧集海报）")
                     self.__image_change(rel, "未比对", "跳过（在线无此图）", label,
                                         "该季缺海报，且不允许回退", "")
+                    continue
+                if spec.kind in no_image:
+                    # 在线这一类型确实一张图都没有。**明确标注、绝不回退。**
+                    logger.info(f"{rel}：在线没有「{spec.kind}」这类图片，"
+                                f"未写入 {path.name}")
+                    self.__image_change(rel, "未比对", "跳过（在线无此图）", label,
+                                        "在线该类型无图", "")
                 continue
             self.report.bump("images_scanned")
 
@@ -3471,7 +3563,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
         return base / "image_manifest.json"
 
     def __build_provider(self):
-        quality = self._image_quality if self._image_quality in IMG_SIZES else "standard"
         limit = self.__int(self._cast_limit, 20)
         # Key 与代理都自动沿用 MoviePilot 的配置（插件里已不再提供这两项的输入框）
         own_key = (self._tmdb_api_key or "").strip()
@@ -3481,17 +3572,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             logger.info("TMDB 数据源：%s%s" % (
                 "插件内单独配置的 API Key" if own_key else "自动读取 MoviePilot 中配置的 API Key",
                 "，代理沿用宿主的" if proxy else ""))
-            logger.info("图片来源优先级：" + " → ".join(
-                IMAGE_SOURCE_CN.get(s, s) for s in self._image_sources))
-            logger.info("选图规则：优先本语言（%s），本语言没有则按评分从全部候选里取"
-                        % (self._language or "?"))
-            return TmdbProvider(key, self._language, proxy or None,
-                                CERT_COUNTRY, limit, quality,
-                                concurrency=self._concurrency,
-                                source_order=self._image_sources)
+            return build_tmdb_provider(key, self._language, proxy, limit,
+                                       self._image_quality, self._concurrency,
+                                       self._image_sources)
         logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
                        "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
-        return HostProvider(quality, limit)
+        return HostProvider(normalize_quality(self._image_quality), limit)
 
     @staticmethod
     def __int(value: Any, default: int) -> int:
@@ -3515,14 +3601,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 logger.warning("未配置任何媒体库目录，任务结束")
                 return
             if root_types:
-                logger.info("已限定目录类型：" + "，".join(
-                    f"{item} → {TYPE_TAG_CN.get(forced, forced)}"
-                    for item, forced in root_types.items()))
+                logger.info("已限定目录类型：" + describe_root_types(root_types))
             cfg = EngineConfig(
                 roots=roots,
                 exclude_paths=self.__split_lines(self._exclude_paths),
                 root_types=root_types,
-                mode=self._mode if self._mode in ("report", "gapfill", "sync", "force") else "sync",
+                mode=normalize_mode(self._mode),
                 protect_fields=set(),  # 插件已移除「保护字段」（引擎与 CLI 的 --protect 仍保留该能力）
                 only_fields=set(),    # 插件已移除「字段白名单」（引擎与 CLI 的 --only 仍保留该能力）
                 respect_lock=self._respect_lock,
@@ -3530,11 +3614,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 backup=self._backup,
                 max_files=0,          # 插件不再提供单轮上限（引擎仍支持，CLI 用 --max-files）
                 concurrency=self._concurrency,
-                image_mode=(self._image_mode if self._image_mode in (IMG_OFF, IMG_MISSING, IMG_SYNC)
-                            else IMG_SYNC),
+                image_mode=normalize_image_mode(self._image_mode),
                 image_kinds=self.__image_kinds_set(),
-                image_quality=(self._image_quality if self._image_quality in IMG_SIZES
-                               else "standard"),
+                image_quality=normalize_quality(self._image_quality),
                 manifest_path=self.__manifest_file(),
             )
             provider = self.__build_provider()
@@ -3547,28 +3629,16 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             except Exception as exc:
                 logger.warning(f"写入报告失败：{exc}")
             try:
-                self.save_data("nfogapfill_report", {
-                    "scanned": report.scanned, "changed": report.changed_files,
-                    "untouched": report.untouched, "unresolved": report.unresolved,
-                    "finished": report.finished, "mode": report.mode,
-                    "images_scanned": report.images_scanned,
-                    "images_written": report.images_written,
-                    "image_bytes": report.image_bytes,
-                })
+                self.save_data("nfogapfill_report", report.to_dict())
             except Exception:
                 pass
 
             try:
                 self.__changes_file().write_text(json.dumps({
-                    "finished": report.finished, "mode": report.mode,
-                    "dry_run": self._dry_run, "provider": report.provider,
-                    "scanned": report.scanned, "changed_files": report.changed_files,
-                    "unchanged": report.untouched,
-                    "images_scanned": report.images_scanned,
-                    "images_written": report.images_written,
-                    "image_bytes": report.image_bytes,
+                    # 字段清单以 Report.to_dict() 为唯一来源，这里只补插件特有的两项
+                    **report.to_dict(rows=True),
+                    "dry_run": self._dry_run,
                     "errors": report.errors[:15],
-                    "rows": report.change_rows(),
                 }, ensure_ascii=False, indent=1), encoding="utf-8")
             except Exception as exc:
                 logger.warning(f"写入变更明细失败（详情页会退化为展示完整报告）：{exc}")
@@ -3605,17 +3675,12 @@ def build_cli_provider(args) -> Any:
             raise SystemExit("--source file 需要同时指定 --cache <json 路径>")
         return FileProvider(args.cache)
     if args.source == "host":
-        return HostProvider(args.image_quality, args.cast_limit)
+        return HostProvider(normalize_quality(args.image_quality), args.cast_limit)
     if not args.api_key:
         raise SystemExit("--source tmdb 需要 --api-key，或设置环境变量 TMDB_API_KEY")
-    order = image_source_order(args.image_sources)
-
-    logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
-    logger.info("选图规则：优先本语言（%s），本语言没有则按评分从全部候选里取"
-                % (args.lang or "?"))
-    return TmdbProvider(args.api_key, args.lang, args.proxy or None, CERT_COUNTRY,
-                        args.cast_limit, args.image_quality,
-                        source_order=order)
+    return build_tmdb_provider(args.api_key, args.lang, args.proxy or "",
+                              args.cast_limit, args.image_quality,
+                              source_order=args.image_sources)
 
 
 def cli_main(argv: Optional[List[str]] = None) -> int:
@@ -3673,8 +3738,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
         if not root.is_dir():
             raise SystemExit(f"目录不存在：{root}")
     if root_types:
-        print("目录类型限定：" + "，".join(
-            f"{item} → {TYPE_TAG_CN.get(forced, forced)}" for item, forced in root_types.items()))
+        print("目录类型限定：" + describe_root_types(root_types))
     if not args.fix:
         args.mode = "report"
 
@@ -3704,15 +3768,8 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     print(report.to_text())
     if args.json_out:
         Path(args.json_out).write_text(json.dumps({
-            "scanned": report.scanned, "untouched": report.untouched,
-            "changed_files": report.changed_files, "skipped_locked": report.skipped_locked,
-            "unresolved": report.unresolved, "failed": report.failed,
-            "counts": report.counts, "errors": report.errors,
-            "images_scanned": report.images_scanned,
-            "images_written": report.images_written,
-            "image_bytes": report.image_bytes,
-            "image_counts": report.image_counts,
-            "image_applied": report.image_applied,
+            # 字段清单以 Report.to_dict() 为唯一来源，这里只补 CLI 特有的明细
+            **report.to_dict(),
             "changes": [c.__dict__ for c in report.changes],
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n报告已写入：{args.json_out}")
