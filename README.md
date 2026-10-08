@@ -27,7 +27,6 @@
 
 - [NfoGapFill — NFO 与图片差异比对](docs/NfoGapFill.md)：判定规则、四种运行模式、图片类型、三层保护、配置项详解、历史脏值修复
 - [部署与排错](docs/DEPLOY.md)：`PLUGIN_MARKET` 配置、镜像与代理设置、常见问题
-- [Jellyfin 详情页 logo/文字二选一](jellyfin/logo-title-fix.css)：把 CSS 引入 Jellyfin 自定义 CSS 即可
 
 ### 版本历史
 
@@ -53,7 +52,6 @@ MoviePilot-Plugins/
 │   └── fetch_real_samples.py
 ├── tests/                           # 离线测试（不连 MoviePilot，伪造宿主 app 包）
 │   ├── _self_test.py / _self_test_plugin.py / _fixture/
-├── jellyfin/logo-title-fix.css      # Jellyfin 详情页 logo/文字二选一
 └── RELEASE_v1.7.8.md / RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
 ```
 
