@@ -192,7 +192,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.8.7"
+PLUGIN_VERSION = "1.9.0"
 # 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
 #
 # 三条约束（都踩过坑，别改回去）：
@@ -291,6 +291,23 @@ TMDB_IMAGE_KINDS: Tuple[str, ...] = ("poster", "backdrop", "logo", "thumb")
 FANART_IMAGE_KINDS: Tuple[str, ...] = ("thumb", "landscape", "banner", "disc", "clearart")
 
 IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
+
+# ── 背景图（backdrop）的选取顺序 ───────────────────────────────────────
+# 背景图是**语言无关**的装饰图（同一张图供所有语言共用），所以「本语言优先」这套
+# 为海报 / 徽标设计的规则套到它身上反而会挑坏：
+#   实测《无职转生》(tv 94664)，TMDB 官网 backdrops 列表第 1 张是
+#   「无语言 · 3840×2160 · 8.034 分 · 15 票」的官方头图；但本语言优先会把它滤掉，
+#   只在 7 张中文图（评分与票数**全是 0**）里按分辨率挑出一张 1920×1080 的，
+#   结果与官网默认展示的完全不同。
+# 于是背景图默认改走 web：**直接取 TMDB 返回列表的第一张**（= 官网 images 页
+# 默认展示顺序），不做语言过滤、也不重新排序。想回到旧行为可切到 language。
+BACKDROP_WEB, BACKDROP_LANGUAGE = "web", "language"
+BACKDROP_ORDERS: Tuple[str, ...] = (BACKDROP_WEB, BACKDROP_LANGUAGE)
+
+
+def normalize_backdrop_order(raw: Any) -> str:
+    """背景图选取顺序：web（跟随 TMDB 官网，默认）/ language（本语言优先），非法值回落 web。"""
+    return raw if raw in BACKDROP_ORDERS else BACKDROP_WEB
 
 # ── 图片来源优先级 ─────────────────────────────────────────────────────
 # 每类图优先去哪个源取。默认「TMDB 优先、fanart.tv 其次」：
@@ -1318,46 +1335,60 @@ def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root
         raise last_exc
 
 
-def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
-    """从 TMDB 的图片数组里挑一张。**所有图片类型统一走这一套规则。**
+def pick_best_image(entries: List[dict], language: str,
+                    language_free: bool = False) -> Optional[dict]:
+    """从 TMDB 的图片数组里挑一张。
 
-    两档，每档内部都按 **vote_average（评分）降序**：
+    **两种模式**：
+
+    ★ 默认（`language_free=False`）——「本语言优先」两档，**海报 / 徽标 / 剧照等
+      与语言强相关的类型用它**（用户要看的是中文标题的海报 / 徽标）：
 
         1. **本语言**（`language`，即设置页的「元数据语言」，如 zh-CN）；
         2. 本语言一张都没有 → **不限语言**，全部候选一起按评分降序取。
 
-    排序键依次是：**评分降序 → 票数降序 → 分辨率降序 → TMDB 返回顺序**。
+      排序键依次是：**评分降序 → 票数降序 → 分辨率降序 → TMDB 返回顺序**。
 
-    ★ 为什么以「评分」为准而不是「票数」：票数只能说明「有多少人投过票」，
-      不代表图好 —— 一张图可能因为曝光多而被大量投低分。实测《凡人修仙传》
-      (tv 106449) 的 142 张中文海报里，票数最高那张（18 票）平均分只有 3.14，
-      而评分最高那张（7.54）只有 8 票；按票数排序会把口碑最差的那张选中。
-      改为评分优先后，该片选中的正是 7.54 那张。
+      ★ 为什么以「评分」为准而不是「票数」：票数只能说明「有多少人投过票」，
+        不代表图好 —— 一张图可能因为曝光多而被大量投低分。实测《凡人修仙传》
+        (tv 106449) 的 142 张中文海报里，票数最高那张（18 票）平均分只有 3.14，
+        而评分最高那张（7.54）只有 8 票；按票数排序会把口碑最差的那张选中。
+        改为评分优先后，该片选中的正是 7.54 那张。
 
-    ★ 票数降序只作**并列时的兜底**：两张图评分一样时，投过票的那张
-      样本更多、更可信，所以排在前面。
+      ★ 票数降序只作**并列时的兜底**：两张图评分一样时，投过票的那张
+        样本更多、更可信，所以排在前面。
 
-    ★ 分辨率降序是**第二层兜底**：评分与票数都相同时取更大的那张
-      （先比宽度、再比高度）。这类"全并列"在冷门条目上很常见 ——
-      实测《轻音少女》(tv 42253) 有 3 张海报并列最高分 3.334、且票数都是 1，
-      其中两张是 2000×3000、一张是 1000×1500，此时应该给大图。
+      ★ 分辨率降序是**第二层兜底**：评分与票数都相同时取更大的那张
+        （先比宽度、再比高度）。这类"全并列"在冷门条目上很常见 ——
+        实测《轻音少女》(tv 42253) 有 3 张海报并列最高分 3.334、且票数都是 1，
+        其中两张是 2000×3000、一张是 1000×1500，此时应该给大图。
 
-    ★ 为什么第 2 档不限制语言：既然本语言根本没有图，继续空着只会让这一类型缺失；
-      与其留白，不如在全部候选里按同一套评分规则做二次择优。
+      ★ 为什么第 2 档不限制语言：既然本语言根本没有图，继续空着只会让这一类型缺失；
+        与其留白，不如在全部候选里按同一套评分规则做二次择优。
 
-    ★ 低票数噪声已实测排除：TMDB 上只被投过 1 票的图，评分上限很低
-      （实测三部热门片里，1 票图的最高评分都只有 3.334），
-      且给全局最高分图加上「≥2 / ≥3 / ≥5 票」门槛后**结果完全相同**，
-      所以不需要额外设最低票数门槛。
+      ★ 低票数噪声已实测排除：TMDB 上只被投过 1 票的图，评分上限很低
+        （实测三部热门片里，1 票图的最高评分都只有 3.334），
+        且给全局最高分图加上「≥2 / ≥3 / ≥5 票」门槛后**结果完全相同**，
+        所以不需要额外设最低票数门槛。
+
+    ★ `language_free=True` —— **完全不做语言过滤、也不重新排序**，直接返回
+      TMDB 返回列表里第一张有效图，即「TMDB 官网 images 页图片列表的默认展示
+      顺序」。**背景图（backdrop）用它**（由配置项 `backdrop_order` 决定）：
+      背景图语言无关，官网列表第一张就是官方综合排序里最好的那张；而「本语言
+      优先」会把它滤掉、在少量低分本语言图里挑出一张（见文件顶部 BACKDROP_* 注释）。
 
     候选全为空（`entries` 为空、或所有项都没有 `file_path`）→ 返回 None，
     由上层记为该类型缺失、不写文件。
     """
-    lang = (language or "").split("-")[0].lower()
-
     candidates = [item for item in (entries or []) if item.get("file_path")]
     if not candidates:
         return None
+
+    if language_free:
+        # 按 TMDB 原始顺序取第一张 —— 与官网 images 页默认列表顺序一致
+        return candidates[0]
+
+    lang = (language or "").split("-")[0].lower()
 
     same_lang = [item for item in candidates
                  if lang and (item.get("iso_639_1") or "").lower() == lang]
@@ -1486,7 +1517,7 @@ class TmdbProvider:
     def __init__(self, api_key: str, language: str = "zh-CN", proxy: Optional[str] = None,
                  cert_country: str = "US", cast_limit: int = 20,
                  image_quality: str = "standard", concurrency: int = 1,
-                 source_order: Any = None):
+                 source_order: Any = None, backdrop_order: str = BACKDROP_WEB):
         self.api_key = api_key
         self.language = language
         self.cert_country = (cert_country or "US").upper()
@@ -1494,6 +1525,8 @@ class TmdbProvider:
         self.image_quality = normalize_quality(image_quality)
         # 图片来源优先级（默认 TMDB → fanart.tv）
         self.source_order = image_source_order(source_order)
+        # 背景图选取顺序：web（跟随 TMDB 官网列表第一张，默认）/ language（本语言优先）
+        self.backdrop_order = normalize_backdrop_order(backdrop_order)
         # 「在线确实一张图都没有」的类型集合。
         # v1.8.0 起选不出图只剩这一种原因，所以这里只需记「哪些类型确实是空的」；
         # 具体该怎么说、算不算缺失，由 Engine 决定（引擎不该读服务端的措辞）。
@@ -1758,10 +1791,14 @@ class TmdbProvider:
                 # 不是横版缩略图），留给 fanart 的 tvthumb / moviethumb
                 continue
             entries = data.get(api_key) or []
-            # v1.8.0：只要有候选就一定能选出一张（本语言优先，否则全候选按评分降序），
-            # 所以「没选到」只剩一种原因 —— 该类型在线一张图都没有。
+            # 只要有候选就一定能选出一张，所以「没选到」只剩一种原因 —— 该类型在线一张图都没有。
             # 请求层已显式枚举常见语言，无需再补探测请求。
-            best = pick_best_image(entries, self.language)
+            # 背景图：默认直接取 TMDB 原始列表第一张（= 官网 images 页展示顺序，
+            # 不做语言过滤、不重排），见 backdrop_order 与文件顶部 BACKDROP_* 注释；
+            # 海报 / 徽标 / 剧照仍走「本语言优先」规则。
+            best = pick_best_image(
+                entries, self.language,
+                language_free=(kind == "backdrop" and self.backdrop_order == BACKDROP_WEB))
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
             else:
@@ -2061,30 +2098,38 @@ class FileProvider:
 # ══════════════════════════════════════════════════════════════════════
 # 数据源工厂（插件与 CLI 共用）
 # ══════════════════════════════════════════════════════════════════════
-def log_pick_rule(language: str, order: Sequence[str]) -> None:
+def log_pick_rule(language: str, order: Sequence[str],
+                  backdrop_order: str = BACKDROP_WEB) -> None:
     """打印「来源优先级 + 选图规则」两行。
 
     插件与 CLI 共用同一份措辞 —— 以前两边各写一份，v1.8.x 改选图规则时
     就必须记得同时改两处，漏一处就会出现「日志说的规则和实际行为不一致」。
     """
     logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
-    logger.info("选图规则：优先本语言（%s），本语言没有则按评分从全部候选里取"
+    logger.info("选图规则：海报 / 徽标 / 剧照优先本语言（%s），本语言没有则按评分从全部候选里取"
                 % (language or "?"))
+    if normalize_backdrop_order(backdrop_order) == BACKDROP_WEB:
+        logger.info("背景图：直接取 TMDB 官网列表顺序的第一张（不做语言过滤 / 不重排）")
+    else:
+        logger.info("背景图：与海报一致，按「本语言优先 + 评分」规则选取")
 
 
 def build_tmdb_provider(api_key: str, language: str = "zh-CN",
                         proxy: str = "", cast_limit: int = 20,
                         image_quality: str = "standard", concurrency: int = 1,
-                        source_order: Any = None) -> TmdbProvider:
+                        source_order: Any = None,
+                        backdrop_order: str = BACKDROP_WEB) -> TmdbProvider:
     """构造「TMDB 直连」数据源，顺带把来源优先级与选图规则写进日志。
 
     插件与 CLI 走同一个入口，配置项到 provider 参数的映射只在这里定义一次。
     """
     order = image_source_order(source_order)
-    log_pick_rule(language, order)
+    backdrop_order = normalize_backdrop_order(backdrop_order)
+    log_pick_rule(language, order, backdrop_order)
     return TmdbProvider(api_key, language, proxy or None, CERT_COUNTRY,
                         cast_limit, normalize_quality(image_quality),
-                        concurrency=concurrency, source_order=order)
+                        concurrency=concurrency, source_order=order,
+                        backdrop_order=backdrop_order)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -3031,6 +3076,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _fanart_image_kinds: Any = FANART_IMAGE_KINDS  # fanart 下拉（界面展示）
     _image_quality: str = "standard"
     _image_sources: Any = IMAGE_SOURCES      # 统一由 image_source_order 收敛成有序列表
+    _backdrop_order: str = BACKDROP_WEB      # 背景图选取顺序：web（跟随官网）/ language
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
 
@@ -3082,7 +3128,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._image_quality = config.get("image_quality") or "standard"
             # 图片来源优先级：收敛成有序列表，非法值顺手修正回默认
             self._image_sources = image_source_order(config.get("image_sources"))
-            # 无本语言海报时的回退顺序：同样收敛成有序列表并回写修正
+            # 背景图选取顺序：web（跟随 TMDB 官网）/ language（本语言优先），非法值回落 web
+            self._backdrop_order = normalize_backdrop_order(config.get("backdrop_order"))
 
         self.stop_service()
 
@@ -3201,8 +3248,19 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "注意源本身有差别：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图"
                         "**只有 fanart.tv 有** —— 这几类无论顺序如何都只能取 fanart 的。"),
                 ),
+                form_row(
+                    form_select("backdrop_order", "背景图选取顺序", {
+                        "web": "跟随 TMDB 官网顺序（不限语言，取列表第一张）— 推荐",
+                        "language": "跟随元数据语言（本语言优先 + 评分）",
+                    }, md=12),
+                    form_alert(
+                        "背景图是语言无关的装饰图：TMDB 官网 images 页列表第一张"
+                        "就是官方排序里最好的那张（常为「无语言」的高分大图）。"
+                        "默认「跟随官网顺序」—— 直接取 TMDB 原始列表第一张，"
+                        "不做语言过滤、也不重排。"),
+                ),
                 form_row(form_alert(
-                    "所有类型的图片共用一套选图规则：先按「元数据语言」取本语言图，"
+                    "其余图片（海报 / 徽标 / 剧照）仍按「元数据语言」优先：先取本语言图、"
                     "**按评分（vote_average）从高到低**；本语言一张都没有时"
                     "不再限定语言，**从全部候选里按评分从高到低取**。"
                     "评分相同时票数多的优先，再相同则取分辨率更大的那张。")),
@@ -3287,6 +3345,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "fanart_image_kinds": list(FANART_IMAGE_KINDS),
             "image_quality": "standard",
             "image_sources": ",".join(IMAGE_SOURCES),
+            "backdrop_order": BACKDROP_WEB,
             }
 
     def get_page(self) -> List[dict]:
@@ -3467,6 +3526,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "fanart_image_kinds": self._fanart_image_kinds,
                 "image_quality": self._image_quality,
                 "image_sources": ",".join(self._image_sources),
+                "backdrop_order": self._backdrop_order,
             })
         except Exception as exc:
             logger.warning(f"保存插件配置失败：{exc}")
@@ -3518,7 +3578,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "，代理沿用宿主的" if proxy else ""))
             return build_tmdb_provider(key, self._language, proxy, limit,
                                        self._image_quality, self._concurrency,
-                                       self._image_sources)
+                                       self._image_sources, self._backdrop_order)
         logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
                        "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
         return HostProvider(normalize_quality(self._image_quality), limit)
@@ -3624,7 +3684,8 @@ def build_cli_provider(args) -> Any:
         raise SystemExit("--source tmdb 需要 --api-key，或设置环境变量 TMDB_API_KEY")
     return build_tmdb_provider(args.api_key, args.lang, args.proxy or "",
                               args.cast_limit, args.image_quality,
-                              source_order=args.image_sources)
+                              source_order=args.image_sources,
+                              backdrop_order=args.backdrop_order)
 
 
 def cli_main(argv: Optional[List[str]] = None) -> int:
@@ -3664,6 +3725,9 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                         help="处理的图片类型，逗号分隔（默认四种全开；"
                              "可选 poster/backdrop/logo/thumb/banner/disc/clearart/landscape，"
                              "即「TMDB 下拉 ∪ fanart 下拉」的并集）")
+    parser.add_argument("--backdrop-order", choices=list(BACKDROP_ORDERS), default=BACKDROP_WEB,
+                        help="背景图选取顺序：web = 直接取 TMDB 官网列表第一张（默认，"
+                             "不限语言、不重排）；language = 本语言优先 + 评分")
     parser.add_argument("--image-quality", choices=["standard", "original"], default="standard",
                         help="图片画质，默认 standard（海报 w780 / 背景图 w1280 / 徽标 w500）")
     parser.add_argument("--image-sources", default="tmdb,fanart",
