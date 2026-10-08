@@ -14,7 +14,7 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
         · 与在线数据不一致 → 替换
         · 与在线数据一致   → 跳过（不产生任何写入，不改动文件 mtime）
     NFO 字段与图片共用这套判定；图片另外靠「指纹清单」在稳态下零下载地判定一致。
-    三层保护：NFO 内 lockdata/lockedfields、插件配置的「保护字段」、只报告模式。
+    三层保护：NFO 内 lockdata/lockedfields、只补缺失（gapfill）模式、演练模式（dry_run）。
 
 ────────────────────────────────────────────────────────────────────────
 一、作为 MoviePilot 插件部署（推荐：从插件市场装）
@@ -83,22 +83,28 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
     因此稳态下零下载即可判定「相同」。首次运行需要下载比对以建立指纹（有流量开销）。
     characterart（人物图）仍不支持 —— fanart.tv 有但 MP 的画集清单里没有它，需要时再说。
 
+    ★ v1.8.0 选图规则（**所有类型统一**，海报 / 背景图 / 徽标 / 剧照 / 季图都一样）：
+        第 1 档：先取「元数据语言」对应的本语言图，档内按 vote_count（投票数）降序；
+        第 2 档：本语言一张都没有 → 不限语言，全部候选一起按 vote_count 降序取；
+        同票时按 TMDB 返回顺序（官方推荐度，越靠前越「钦定」）。
+      只有某类型在线一张图都没有时才记为缺失、不写该文件。
+      （旧版海报有单独的回退链，其它类型按分辨率/评分排序 —— 口径不一致，已统一。）
+
 ────────────────────────────────────────────────────────────────────────
 五、与 MoviePilot 的配置联动（全部自动继承，不用手填）
     TMDB API Key 自动读取 MoviePilot 里配置的 TMDB_API_KEY；
     网络代理     自动读取 MoviePilot 里配置的 PROXY_HOST —— 插件里已不再提供代理输入框。
     两者都拿不到时才退回宿主刮削通道（该通道只有海报与背景图）。
 
-    分级地区码 决定 NFO 里 <mpaa> 取哪个国家/地区的分级：
-        US → PG-13 / R　　GB → 12 / 15 / 18　　JP → G / PG12 / R15+
-        中国大陆没有官方影视分级体系，填 CN 通常取不到值；
-        若所选地区恰好缺该片分级，会自动退回到任意有值的地区，不会留空。
+    分级地区码固定为美国（US），决定 NFO 里 <mpaa> 取哪份分级：
+        US → PG-13 / R　　（引擎参数 cert_country 仍可自定义，插件配置页已不提供）
+        若该片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，不会留空。
 
     演员写入上限 可选 10 / 20 / 30 / 50 / 全部（全部 = 0，不限制）。
 
-    保护字段（protect_fields）：照常参与比对、缺失也会补，但永不覆盖已有内容。
-    （早期版本还有一个「字段白名单」用来收窄处理范围，按用户反馈已移除；
-     该能力仍保留在引擎与 CLI 的 --only 里。）
+    v1.8.0 起配置页不再提供「保护字段」；想保住手工润色的内容请用「只补缺失」（gapfill）模式。
+    引擎层的 EngineConfig.protect_fields 精细语义仍保留，供代码直接调用
+    （引擎与 CLI 的 --only 也保留「只处理某几个字段」的能力）。
 
     详情页展示的是「本次修改了哪些文件」表格（含演练/只报告模式下的待改动清单）；
     完整文本报告（含每一条跳过的原因）写在插件数据目录的 last_report.txt。
@@ -185,7 +191,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.7.8"
+PLUGIN_VERSION = "1.8.0"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -285,50 +291,6 @@ IMAGE_SOURCE_CN = {"tmdb": "TMDB", "fanart": "fanart.tv"}
 #   textless  → 无文字版（iso_639_1 为空，纯画面、不带任何文字）
 #   en        → 英文标题
 #   original  → 原始语言标题（original_language，动漫多为日文）
-#
-# ★ 默认只有 textless —— 用户明确要求：「元数据语言=中文时优��中文海报，
-#   没有中文就回退无文字海报，**不要**回退到英文或日文等其它语言文字」。
-#   所以默认链路是 中文 → 无文字 →（没有就明确不写，绝不换成外文海报）。
-#   想放宽时可在设置页把 en / original 加进回退链（自己承担观感不统一的后果）。
-POSTER_FALLBACKS: Tuple[str, ...] = ("textless",)
-# 可选档位的**全集**（= 设置页下拉里能选到的值）。
-# ★ 注意别拿 POSTER_FALLBACKS 当白名单用：它是「默认值」，只有 textless 一档；
-#   早先校验写成 `part in POSTER_FALLBACKS`，导致 en / original 永远被当非法值丢掉，
-#   「放宽回退」的选项形同虚设（单测「把 en 排在 textless 前则选英文」就挂在这）。
-POSTER_FALLBACK_CHOICES: Tuple[str, ...] = ("textless", "en", "original")
-POSTER_FALLBACK_CN = {
-    "textless": "无文字海报（纯画面、无任何文字）",
-    "en": "英文标题海报",
-    "original": "原始语言标题海报（动漫多为日文）",
-}
-
-# 报告里描述「在线这张图都有哪些语言」时用的中文明细
-LANG_CN = {
-    "zh": "中文", "en": "英文", "ja": "日文", "ko": "韩文",
-    "tw": "中文（繁体）", "fr": "法文", "de": "德文", "es": "西班牙文",
-    "it": "意大利文", "pt": "葡萄牙文", "ru": "俄文", "th": "泰文",
-    "vi": "越南文", "hi": "印地文", "ar": "阿拉伯文", "sv": "瑞典文",
-    "da": "丹麦文", "nl": "荷兰文", "pl": "波兰文", "tr": "土耳其文",
-}
-
-
-def poster_fallback_order(raw: Any = None) -> List[str]:
-    """把「无本语言海报时的回退顺序」收敛成有序列表。
-
-    吃列表（UI 下拉）或逗号字符串（老配置 / CLI），非法值丢弃；
-    全部非法或缺失时回落到默认 `POSTER_FALLBACKS`（永不返回空）。
-    """
-    if isinstance(raw, (list, tuple, set)):
-        parts = [str(item).strip().lower() for item in raw]
-    else:
-        parts = [piece.strip().lower() for piece in str(raw or "").split(",")]
-    order: List[str] = []
-    for part in parts:
-        if part in POSTER_FALLBACK_CHOICES and part not in order:
-            order.append(part)
-    return order or list(POSTER_FALLBACKS)
-
-
 def image_source_order(raw: Any = None) -> List[str]:
     """把配置收敛成有序的来源列表，默认 `["tmdb", "fanart"]`。
 
@@ -1313,56 +1275,51 @@ def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root
         raise last_exc
 
 
-def pick_best_image(entries: List[dict], language: str,
-                    original_lang: str = "", fallbacks: Any = None) -> Optional[dict]:
-    """从 TMDB 的图片数组里挑一张。
+def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
+    """从 TMDB 的图片数组里挑一张。**所有图片类型统一走这一套规则。**
 
-    **只按语言优先级挑**，不再掺入分辨率 / 评分 / 投票数 —— 同一档里
-    直接取 TMDB 返回顺序里的第一条（TMDB 自身就是按官方推荐度排的，越靠前越"钦定"）。
+    两档，每档内部都按 **vote_count 降序**，同票按 TMDB 返回顺序
+    （即官方推荐度，越靠前越「钦定」）：
 
-    语言顺序：
-        1. **本语言**（`language`，即插件的「元数据语言」，如 zh-CN）—— 永远第一优先；
-        2. 本语言一张都没有时，按 `fallbacks` 依次匹配。**默认只有 `textless`**
-           （`iso_639_1` 为空的无文字海报）—— 即「元数据语言=中文时优先中文海报，
-           没有中文海报就回退无文字海报」；
-        3. 匹配不上 → **返回 None**，明确表示「没有合适的图」，由上层记为该类型缺失。
+        1. **本语言**（`language`，即设置页的「元数据语言」，如 zh-CN）；
+        2. 本语言一张都没有 → **不限语言**，全部候选一起按票数降序取。
 
-    ★ 第3 步是关键：这里**绝不**兜底「随便给一张」。早先版本会，于是没有中文海报的
-      片子拿到英文或日文标题海报（同一个库里观感割裂：一半中文标题、一半日文标题）。
-      现在宁可**不写这一张**，也不拿外文海报凑数；需要放宽时可把 en / original
-      加进设置页的「回退顺序」里（自己承担观感不统一的后果）。
+    ★ 为什么第2 档不限制语言：既然本语言根本没有图，继续空着只会让这一类型缺失；
+      而 TMDB 自己的 `vote_count` 就是社区投票，票最高的图客观上是观众最认可的版本。
+      与其留白，不如用票数在全部候选里做二次择优。
 
-    这样与 MP 官方一致：MP 对根目录的 poster/backdrop/logo 直接取 TMDB 主记录里
-    那一张（`MediaInfo.poster_path` 等），不带挑选；本函数取"同语言里的第一条"
-    最接近该行为。
+    票数相同时用 TMDB 返回顺序兜底，而不是分辨率 / 评分：
+    早先版本比过「分辨率越大越好 → 评分 → 投票数」，会挑出与 MP 官方不同的图
+    （MP 对根目录 poster/backdrop/logo 直接取 TMDB 主记录的钦定图），表现为「两边图不一样」。
+    现按用户要求以**票数**为唯一排序依据，同票才轮到返回顺序。
 
-    注意：早先版本还会比「分辨率越大越好 → 评分 → 投票数」，会挑出与 MP 不同的图
-    （TMDB 钦定图未必是分辨率最大的），表现为"两边图不一样"，故去掉。
+    候选全为空（`entries` 为空、或所有项都没有 `file_path`）→ 返回 None，
+    由上层记为该类型缺失、不写文件。
     """
     lang = (language or "").split("-")[0].lower()
-    orig = (original_lang or "").split("-")[0].lower()
-    order = poster_fallback_order(fallbacks)
 
-    def lang_rank(item: dict):
-        """0 = 本语言；1..N = 回退档位；**None = 不该选它**。"""
-        code = (item.get("iso_639_1") or "").lower()
-        if lang and code == lang:
-            return 0
-        for idx, key in enumerate(order, start=1):
-            if key == "textless" and not code:
-                return idx
-            if key == "en" and code == "en":
-                return idx
-            if key == "original" and orig and code == orig:
-                return idx
-        return None                     # 其它语言一律不选
-
-    eligible = [(item, lang_rank(item)) for item in (entries or []) if item.get("file_path")]
-    eligible = [(item, rank) for item, rank in eligible if rank is not None]
-    if not eligible:
+    candidates = [item for item in (entries or []) if item.get("file_path")]
+    if not candidates:
         return None
-    # 语言档位升序；同级保持 TMDB 原始顺序（越靠前越钦定）
-    return min(eligible, key=lambda pair: pair[1])[0]
+
+    same_lang = [item for item in candidates
+                 if lang and (item.get("iso_639_1") or "").lower() == lang]
+    # 第 1 档限本语言；本语言一张都没有时，第 2 档放开到全部候选
+    pool = same_lang or candidates
+
+    def votes(item: dict) -> float:
+        """票数：TMDB 给的是 float 形态（`vote_count: 7.0`），统一成数值比较。"""
+        try:
+            return float(item.get("vote_count") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # 稳定排序：票数降序，同票保持 TMDB 原始顺序（越靠前越钦定）
+    best = pool[0]
+    for item in pool:
+        if votes(item) > votes(best):
+            best = item
+    return best
 
 
 def image_size_for(quality: str, kind: str) -> str:
@@ -1434,6 +1391,11 @@ def merge_image_kinds(tmdb_raw: Any, fanart_raw: Any,
 # ══════════════════════════════════════════════════════════════════════
 # 在线数据源：统一产出 {字段名: [字符串]} 与 {图片类型: URL}
 # ══════════════════════════════════════════════════════════════════════
+# NFO 的 <mpaa> 固定取美国的影视分级（PG-13 / R 这类）。
+# 若该片在 TMDB 上没有美国分级，`_cert()` 会自动退回到任意有值的地区，不会留空。
+CERT_COUNTRY = "US"
+
+
 class TmdbProvider:
     """直连 TMDB。行为最可预测，建议优先使用（需要一个免费 API Key）。"""
 
@@ -1442,7 +1404,7 @@ class TmdbProvider:
     def __init__(self, api_key: str, language: str = "zh-CN", proxy: Optional[str] = None,
                  cert_country: str = "US", cast_limit: int = 20,
                  image_quality: str = "standard", concurrency: int = 1,
-                 source_order: Any = None, poster_fallbacks: Any = None):
+                 source_order: Any = None):
         self.api_key = api_key
         self.language = language
         self.cert_country = (cert_country or "US").upper()
@@ -1450,12 +1412,7 @@ class TmdbProvider:
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
         # 图片来源优先级（默认 TMDB → fanart.tv）
         self.source_order = image_source_order(source_order)
-        # 无本语言海报时的回退顺序（默认只有「无文字」，绝不用外文海报）
-        self.poster_fallbacks = poster_fallback_order(poster_fallbacks)
-        # 原始语言缓存（tmdb_id → original_language），避免重复请求主记录
-        self._orig_lang_cache: Dict[str, str] = {}
-        # 在线有这类型的图、但**没有一张符合语言规则** → {类型: 人话说明}
-        # 与「在线压根没这张图」区分开，报告里要能说清到底是哪种缺失。
+        # 类型 -> 「为什么没选到图」的原因（v1.8.0 后只有「在线没图」等少数情况）
         self.lang_rejected: Dict[str, str] = {}
         # 图片域名跟随宿主配置（国内直连 image.tmdb.org 经常超时，MP 允许换镜像）
         self.img_host = image_host()
@@ -1692,29 +1649,22 @@ class TmdbProvider:
         else:
             return
         # `include_image_language` 决定 TMDB **在服务端**返回哪些语言的图 ——
-        # 没写进去的语言，再怎么选图也拿不到。所以要按回退链把用得上的语言都写上。
-        # 默认回退链只有 textless（无文字），故默认只需 本语言 + null；
-        # 用户把 en / original 加进回退链时，才额外去请求这两种语言。
-        # （实测：原始语言 ja、language=zh-CN，默认只请求 zh,null 时只返回
-        #   11 张（不含 ja）；把 ja 加进来才返回 20 张、其中 9 张 ja。）
-        order = self.poster_fallbacks
-        wanted = [lang, "null"]
-        if "en" in order and "en" not in wanted:
-            wanted.append("en")
-        original_lang = ""
-        if "original" in order:
-            original_lang = self._original_language(tmdb_id, media_type)
-            if original_lang and original_lang not in wanted:
-                wanted.append(original_lang)
-        include = ",".join(part for part in wanted if part)
+        # 没写进去的语言，再怎么选图也拿不到。
+        # v1.8.0 起选图规则是「本语言 → 不限语言按票数降序」，第 2 档要看到全部语言，
+        # 所以这里**显式枚举一批常见语言**而不是只报本语言 + null。
+        # ⚠️ 实测坑：TMDB 的 `include_image_language` **省略或传空串都拿不到全部语言**
+        #   （Friends tmdb_id=2420 的 poster 在这两种写法下都只返回 0 张），
+        #   必须显式列出语言码。语言不够全时只会少拿几个冷门语种的候选，
+        #   不影响正确性（本语言图一定在列表里）。
+        include = ",".join(
+            (lang, "null", "en", "ja", "ko", "fr", "de", "es", "it",
+             "pt", "ru", "th", "vi", "hi", "ar", "sv", "da", "nl", "pl", "tr"))
+        include = ",".join(part for part in include.split(",") if part)
         data = self._get(path, include_image_language=include)
         if not data:
             return
         # 单集的缩略图是「这一集的剧照」，走 TMDB 的 stills（与根目录的横版缩略图不同）
         episode_thumb_key = "stills" if media_type == "episodedetails" else None
-        # 某个类型「按规则没选到」且**候选本身为空**时，要不要补一次全语言探测？
-        # 见 _probe_missing_langs 的注释：一律要探，否则解释不清为什么没写。
-        need_probe: List[str] = []
         for kind in kinds:
             if kind in out:
                 continue
@@ -1724,95 +1674,14 @@ class TmdbProvider:
                 # 不是横版缩略图），留给 fanart 的 tvthumb / moviethumb
                 continue
             entries = data.get(api_key) or []
-            best = pick_best_image(entries, self.language, original_lang, order)
+            # v1.8.0：只要有候选就一定能选出一张（本语言优先，否则全候选按票数降序），
+            # 所以「没选到」只剩一种原因 —— 该类型在线一张图都没有。
+            # 请求层已显式枚举常见语言，无需再补探测请求。
+            best = pick_best_image(entries, self.language)
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
-            elif entries:
-                # ★ 关键：有候选，但没有一张符合语言要求。这与「在线压根没这张图」
-                #   是两回事，必须能说清楚 —— 否则用户只看到「没写海报」，
-                #   根本不知道是 TMDB 上传了外文图、而本插件按规则不放行。
-                self.lang_rejected[kind] = self._describe_rejection(entries)
-            elif kind not in need_probe:
-                need_probe.append(kind)
-        # ★ `include_image_language` 是**服务端**过滤：不在列表里的语言 TMDB 根本不返回。
-        #   所以严格模式下（只请求 zh,null）遇到「只有外文图」的条目时，
-        #   `entries` 会是**空**的 —— 上面那个 `elif entries` 压根不成立，
-        #   用户只会看到「在线没这张图」，看不到真相。
-        #   典型实测：Friends (tmdb_id=2420) 的 poster 只有 1 张英文，
-        #   只请求 zh,null 时 TMDB 返回 0 张；不限制语言才看得见那张英文。
-        #   这里对没选中的类型补一次**全语言**探测请求，只为把「在线其实有什么语言」
-        #   查清楚写进报告 —— 探测结果绝不用于选图。
-        for kind in need_probe:
-            if kind in self.lang_rejected:
-                continue
-            api_key = IMG_API_KEYS.get(kind) or (episode_thumb_key if kind == "thumb" else None)
-            foreign = self._probe_foreign_langs(path, api_key)
-            if foreign:
-                self.lang_rejected[kind] = self._describe_rejection(foreign)
-
-    def _probe_foreign_langs(self, path: str, api_key: str) -> List[dict]:
-        """补一次**不限语言**的图片请求，只为查清「在线其实有哪些语言的图」。
-
-        ★ 为什么要多这一次请求：`include_image_language` 是服务端过滤，
-          严格模式只请求 `zh,null`，于是「只有外文图」的条目返回的是**空列表**
-          （实测 Friends tmdb_id=2420 的 poster：只请求 zh,null → 0 张；
-          不限语言 → 1 张英文）。没有这次探测，报告里就只会写「在线没有海报」，
-          用户完全看不出真相是「TMDB 上有英文海报、但按设置不放行」。
-
-        返回值只用于生成说明文案，**绝不**拿去选图。
-        失败（网络/限流/404）一律返回空，不影响主流程。
-
-        ⚠️ 实测坑：TMDB 的 `include_image_language` **省略掉**也拿不到全部语言 ——
-          Friends (2420) 的 poster在「无该参数」和「空串」两种写法下都只返回 0 张，
-          必须显式列出语言码才行。所以这里显式枚举一批常见语言（一次请求即可覆盖）。
-        """
-        # 常见语言码足够覆盖「用户会看到的那些外文图」，只为写说明，不必全量枚举。
-        probe_langs = ",".join(
-            ("zh", "null", "en", "ja", "ko", "fr", "de", "es", "it",
-             "pt", "ru", "th", "vi", "hi", "ar", "sv", "da", "nl", "pl", "tr"))
-        try:
-            data = self._get(path, include_image_language=probe_langs) or {}
-        except Exception:
-            return []
-        return list(data.get(api_key) or [])
-
-    def _describe_rejection(self, entries: List[dict]) -> str:
-        """把「在线有哪些语言的图」说成一句人话，写进报告/ 日志。
-
-        例如 `en/ja` → 「在线只有英文/日文海报，按「不拿外文海报凑数」的规则已跳过」。
-        无文字（`iso_639_1` 为空）算一种可接受档位，所以这里出现它时不至于被跳过。
-        """
-        langs: List[str] = []
-        for item in entries or []:
-            code = (item.get("iso_639_1") or "").strip().lower()
-            label = LANG_CN.get(code) or (code if code else "无文字")
-            if label not in langs:
-                langs.append(label)
-        want = LANG_CN.get((getattr(self, "language", "") or "").split("-")[0].lower()) \
-            or (getattr(self, "language", "") or "本语言")
-        return (f"在线这类型只有 {'/'.join(langs)} 的图，没有 {want} 版、"
-                f"也没有无文字版；按「不拿外文海报凑数」的规则已跳过（未写入）")
-
-    def _original_language(self, tmdb_id: str, media_type: str) -> str:
-        """取该条目的原始语言（original_language），带缓存。
-
-        只有电影 / 剧集的主记录里有这个字段（季 / 单集没有），
-        且它是**整条记录级别的**，与请求时用的 language 参数无关。
-        取不到（网络失败 / 404）就返回空串，回退逻辑自然跳过 original 档。
-        """
-        if media_type not in ("movie", "tvshow"):
-            return ""
-        cached = self._orig_lang_cache.get(tmdb_id)
-        if cached is not None:
-            return cached
-        path = f"/movie/{tmdb_id}" if media_type == "movie" else f"/tv/{tmdb_id}"
-        try:
-            data = self._get(path) or {}
-        except Exception:
-            data = {}
-        value = str(data.get("original_language") or "").strip().lower()
-        self._orig_lang_cache[tmdb_id] = value
-        return value
+            else:
+                self.lang_rejected[kind] = "在线这类型确实一张图都没有（未写入）"
 
     def _fetch_fanart_images(self, tmdb_id: str, media_type: str, season: Optional[str],
                              kinds: Any, out: Dict[str, str]) -> None:
@@ -2930,13 +2799,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _mode: str = "sync"
     _paths: str = ""
     _exclude_paths: str = ""
-    _protect_fields: str = ""
     _respect_lock: bool = True
     _dry_run: bool = False
     _backup: bool = True
     _tmdb_api_key: str = ""
     _language: str = "zh-CN"
-    _cert_country: str = "US"
     _cast_limit: str = "20"
     _notify: bool = True
     _image_mode: str = IMG_SYNC
@@ -2945,7 +2812,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _fanart_image_kinds: Any = FANART_IMAGE_KINDS  # fanart 下拉（界面展示）
     _image_quality: str = "standard"
     _image_sources: Any = IMAGE_SOURCES      # 统一由 image_source_order 收敛成有序列表
-    _poster_fallbacks: Any = POSTER_FALLBACKS  # 无本语言海报时的回退顺序
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
 
@@ -2961,13 +2827,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._mode = config.get("mode") or "sync"
             self._paths = config.get("paths") or ""
             self._exclude_paths = config.get("exclude_paths") or ""
-            self._protect_fields = config.get("protect_fields") or ""
             self._respect_lock = bool(config.get("respect_lock", True))
             self._dry_run = bool(config.get("dry_run"))
             self._backup = bool(config.get("backup", True))
             self._tmdb_api_key = (config.get("tmdb_api_key") or "").strip()
             self._language = config.get("language") or "zh-CN"
-            self._cert_country = (config.get("cert_country") or "US").strip()
             self._cast_limit = str(config.get("cast_limit") or "20")
             self._notify = bool(config.get("notify", True))
             self._image_mode = config.get("image_mode") or IMG_SYNC
@@ -3000,10 +2864,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             # 图片来源优先级：收敛成有序列表，非法值顺手修正回默认
             self._image_sources = image_source_order(config.get("image_sources"))
             # 无本语言海报时的回退顺序：同样收敛成有序列表并回写修正
-            fallbacks = poster_fallback_order(config.get("poster_fallbacks"))
-            if config.get("poster_fallbacks") != ",".join(fallbacks):
-                repair["poster_fallbacks"] = ",".join(fallbacks)
-            self._poster_fallbacks = fallbacks
 
         self.stop_service()
 
@@ -3175,32 +3035,16 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "poster_fallbacks",
-                                    "label": "没有本语言海报时，回退到",
-                                    "items": [
-                                        {"title": "无文字海报（推荐：绝不用外文海报）", "value": "textless"},
-                                        {"title": "无文字海报 → 英文 → 原始语言", "value": "textless,en,original"},
-                                        {"title": "无文字海报 → 原始语言（日文）→ 英文", "value": "textless,original,en"},
-                                        {"title": "英文 → 无文字海报（不建议）", "value": "en,textless"},
-                                        {"title": "英文 → 无文字海报 → 原始语言", "value": "en,textless,original"},
-                                        {"title": "原始语言（日文）→ 无文字海报", "value": "original,textless"},
-                                    ]}}]},
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "海报的第一优先永远是**本语言**，也就是上面「元数据语言」"
-                                         "选的那个（如「简体中文」→ 中文海报）。"
-                                         "但 TMDB 上很多老番 / 冷门片**根本没人上传中文海报**"
-                                         "（例如《尼古喵喵》14 张海报里只有 3 张中文，"
-                                         "剩下是日文 / 英文 / 无文字各若干），"
-                                         "这时按这里的顺序继续挑。"
-                                         "**默认只回退到「无文字海报」**（纯画面、不带任何文字）—— "
-                                         "刻意**不**回退到英文 / 日文等其它语言文字的海报，"
-                                         "否则同一个库里会混着中文海报和日文海报，观感割裂。"
-                                         "若连无文字海报也没有，就**不写这一张**并在报告里标注"
-                                         "「在线没有合适语言的海报」，绝不拿外文海报凑数。"
-                                         "确实想放宽时再选带英文 / 原始语言的选项。"}]},
+                                 "text": "**所有类型的图片**（海报 / 背景图 / 徽标 / 横版缩略图 / 剧照 / 季海报）"
+                                         "统一使用同一套选图规则："
+                                         "先取上面「元数据语言」对应的本语言图，"
+                                         "**在本语言里按投票数（vote_count）从高到低取**；"
+                                         "本语言一张都没有时，不再限定语言，"
+                                         "**从全部候选里按投票数从高到低取**。"
+                                         "票数相同时按 TMDB 返回顺序（官方推荐度）取更靠前的那张。"
+                                         "只有在某类型在线**一张图都没有**时才记为缺失，不写这一张。"}]},
                         ],
                     },
                     {
@@ -3323,10 +3167,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                 {"component": "VTextarea", "props": {
                                     "model": "exclude_paths", "label": "排除路径", "rows": 2,
                                     "placeholder": "每行一个路径片段，命中即跳过"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "protect_fields", "label": "保护字段（只补不换）",
-                                    "placeholder": "逗号分隔，例如 plot,tagline,actor"}}]},
                         ],
                     },
                     {
@@ -3353,22 +3193,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「保护字段」= 照常参与比对、缺失也会补，但**永远不会覆盖你已有的内容**。"
-                                         "想保住手工润色的简介、自己写的一句话宣传语，就把对应字段填进来。"
-                                         "字段名写 NFO 的标签名（小写、逗号分隔）："
-                                         "电影可用 title, originaltitle, plot, tagline, year, premiered, "
-                                         "runtime, mpaa, rating, genre, studio, country, director, credits, actor；"
-                                         "剧集 tvshow 可用 title, plot, tagline, year, premiered, runtime, mpaa, "
-                                         "rating, genre, studio, country, actor；"
-                                         "单集可用 title, plot, aired, rating, season, episode, director, credits, actor；"
-                                         "季可用 title, plot, premiered, season。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
                                  "text": "「TMDB API Key」留空时会自动读取 MoviePilot 里已配置的 Key，"
                                          "网络代理也会自动沿用 MoviePilot 的 PROXY_HOST —— "
                                          "所以这里通常什么都不用填。只有当 MoviePilot 里也没有可用的 Key 时，"
@@ -3378,39 +3202,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "cert_country",
-                                    "label": "分级地区码（决定 mpaa 取哪个地区的分级）",
-                                    "items": [
-                                        {"title": "美国 — PG-13 / R（默认）", "value": "US"},
-                                        {"title": "中国大陆 — 无官方分级，通常取不到值", "value": "CN"},
-                                        {"title": "中国香港 — IIA / IIB / III", "value": "HK"},
-                                        {"title": "中国台湾 — 普遍级 / 保护级 / 辅15", "value": "TW"},
-                                        {"title": "日本 — G / PG12 / R15+", "value": "JP"},
-                                        {"title": "韩国 — ALL / 12 / 15 / 19", "value": "KR"},
-                                        {"title": "英国 — 12 / 15 / 18", "value": "GB"},
-                                        {"title": "德国 — FSK 12 / FSK 16", "value": "DE"},
-                                        {"title": "法国 — Tous publics / -12 / -16", "value": "FR"},
-                                        {"title": "意大利 — T / VM14 / VM18", "value": "IT"},
-                                        {"title": "西班牙 — APTA / 12 / 16 / 18", "value": "ES"},
-                                        {"title": "澳大利亚 — PG / M / MA15+", "value": "AU"},
-                                        {"title": "加拿大 — PG / 14A / 18A", "value": "CA"},
-                                    ]}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「分级地区码」怎么填：NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），"
-                                         "而 TMDB 上同一部片在不同国家的分级并不一样，这个配置就决定取哪一份 —— "
-                                         "填 US 得到 PG-13 / R，填 GB 得到 12 / 15 / 18，填 JP 得到 G / PG12 / R15+。"
-                                         "注意中国大陆没有官方影视分级体系，填 CN 通常取不到值；"
-                                         "若所选地区恰好缺该片的分级，会自动退回到任意有值的地区，不会留空。"
-                                         "下拉里只列了常用地区；万一需要别的地区，"
-                                         "可以把插件配置里的 cert_country 直接改成对应的两位 ISO 国家码。"}]},
+                                 "text": "NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），"
+                                         "固定取**美国（US）**地区的分级。"
+                                         "若该片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，"
+                                         "不会在 NFO 里留空。"}]},
                         ],
                     },
                     {
@@ -3420,7 +3217,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                 {"component": "VAlert", "props": {
                                     "type": "info", "variant": "tonal"},
                                  "text": "「不一致则替换」会修正与 TMDB 不同的字段（例如过时的简介、错误的年份）。"
-                                         "想保住手工润色的内容，就把它填进「保护字段」。"}]},
+                                         "若想保住手工润色的内容，可改用「只补缺失」，"
+                                         "这样已有内容一律不动。"}]},
                         ],
                     },
                     {
@@ -3446,18 +3244,15 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "backup": True,
             "paths": "",
             "exclude_paths": "",
-            "protect_fields": "",
             "tmdb_api_key": "",
             "language": "zh-CN",
-            "cert_country": "US",
             "cast_limit": "20",
             "image_mode": IMG_SYNC,
             "tmdb_image_kinds": list(TMDB_IMAGE_KINDS),
             "fanart_image_kinds": list(FANART_IMAGE_KINDS),
             "image_quality": "standard",
             "image_sources": ",".join(IMAGE_SOURCES),
-            "poster_fallbacks": ",".join(POSTER_FALLBACKS),
-        }
+            }
 
     def get_page(self) -> List[dict]:
         """详情页主视图 =「本次修改了哪些文件」的表格。
@@ -3628,10 +3423,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "backup": self._backup,
                 "paths": self._paths,
                 "exclude_paths": self._exclude_paths,
-                "protect_fields": self._protect_fields,
                 "tmdb_api_key": self._tmdb_api_key,
                 "language": self._language,
-                "cert_country": self._cert_country,
                 "cast_limit": self._cast_limit,
                 "image_mode": self._image_mode,
                 "image_kinds": self._image_kinds,
@@ -3639,7 +3432,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "fanart_image_kinds": self._fanart_image_kinds,
                 "image_quality": self._image_quality,
                 "image_sources": ",".join(self._image_sources),
-                "poster_fallbacks": ",".join(self._poster_fallbacks),
             })
         except Exception as exc:
             logger.warning(f"保存插件配置失败：{exc}")
@@ -3692,13 +3484,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "，代理沿用宿主的" if proxy else ""))
             logger.info("图片来源优先级：" + " → ".join(
                 IMAGE_SOURCE_CN.get(s, s) for s in self._image_sources))
-            logger.info("无本语言海报时回退顺序：" + " → ".join(
-                POSTER_FALLBACK_CN.get(s, s) for s in self._poster_fallbacks))
+            logger.info("选图规则：优先本语言（%s），本语言没有则按投票数从全部候选里取"
+                        % (self._language or "?"))
             return TmdbProvider(key, self._language, proxy or None,
-                                self._cert_country, limit, quality,
+                                CERT_COUNTRY, limit, quality,
                                 concurrency=self._concurrency,
-                                source_order=self._image_sources,
-                                poster_fallbacks=self._poster_fallbacks)
+                                source_order=self._image_sources)
         logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
                        "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
         return HostProvider(quality, limit)
@@ -3713,10 +3504,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     @staticmethod
     def __split_lines(text: str) -> List[str]:
         return [line.strip() for line in re.split(r"[\r\n]+", text or "") if line.strip()]
-
-    @staticmethod
-    def __split_set(text: str) -> set:
-        return {item.strip().casefold() for item in re.split(r"[,\s]+", text or "") if item.strip()}
 
     def __image_kinds_set(self) -> set:
         """当前生效的图片类型集合（统一走 normalize_image_kinds 收敛）。"""
@@ -3737,7 +3524,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 exclude_paths=self.__split_lines(self._exclude_paths),
                 root_types=root_types,
                 mode=self._mode if self._mode in ("report", "gapfill", "sync", "force") else "sync",
-                protect_fields=self.__split_set(self._protect_fields),
+                protect_fields=set(),  # 插件已移除「保护字段」（引擎与 CLI 的 --protect 仍保留该能力）
                 only_fields=set(),    # 插件已移除「字段白名单」（引擎与 CLI 的 --only 仍保留该能力）
                 respect_lock=self._respect_lock,
                 dry_run=self._dry_run,
@@ -3823,13 +3610,13 @@ def build_cli_provider(args) -> Any:
     if not args.api_key:
         raise SystemExit("--source tmdb 需要 --api-key，或设置环境变量 TMDB_API_KEY")
     order = image_source_order(args.image_sources)
-    fallbacks = poster_fallback_order(args.poster_fallbacks)
+
     logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
-    logger.info("无本语言海报时回退顺序：" + " → ".join(
-        POSTER_FALLBACK_CN.get(s, s) for s in fallbacks))
-    return TmdbProvider(args.api_key, args.lang, args.proxy or None, args.cert_country,
+    logger.info("选图规则：优先本语言（%s），本语言没有则按投票数从全部候选里取"
+                % (args.lang or "?"))
+    return TmdbProvider(args.api_key, args.lang, args.proxy or None, CERT_COUNTRY,
                         args.cast_limit, args.image_quality,
-                        source_order=order, poster_fallbacks=fallbacks)
+                        source_order=order)
 
 
 def cli_main(argv: Optional[List[str]] = None) -> int:
@@ -3852,13 +3639,11 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                         help="report 只报告 / gapfill 只补缺失 / sync 不同则替换（默认）/ force 全量覆盖")
     parser.add_argument("--fix", action="store_true", help="允许写入。不加则等价于 --mode report")
     parser.add_argument("--dry-run", action="store_true", help="打印将要修改的内容但不写盘")
-    parser.add_argument("--protect", default="", help="保护字段（只补不换），逗号分隔，如 plot,tagline")
     parser.add_argument("--only", default="", help="只处理这些字段，逗号分隔")
     parser.add_argument("--exclude", default="", help="排除路径片段，逗号分隔")
     parser.add_argument("--api-key", default=None, help="TMDB API Key（默认读环境变量 TMDB_API_KEY）")
     parser.add_argument("--lang", default="zh-CN", help="元数据语言，默认 zh-CN")
     parser.add_argument("--proxy", default=None, help="代理，如 http://127.0.0.1:7890")
-    parser.add_argument("--cert-country", default="US", help="分级地区码，默认 US")
     parser.add_argument("--cast-limit", type=int, default=20, help="演员写入上限，默认 20；0 = 全部写入")
     parser.add_argument("--concurrency", type=int, default=1,
                         help="并发处理数（1 = 顺序；插件默认 4）")
@@ -3875,10 +3660,6 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                         help="图片画质，默认 standard（海报 w780 / 背景图 w1280 / 徽标 w500）")
     parser.add_argument("--image-sources", default="tmdb,fanart",
                         help="图片来源优先级，逗号分隔，默认 tmdb,fanart（TMDB 优先，fanart 兜底）")
-    parser.add_argument("--poster-fallbacks", default="textless",
-                        help="没有本语言海报时的回退顺序，逗号分隔，"
-                             "可选 textless/en/original，默认 textless（只回退无文字海报，"
-                             "不用外文海报；全都不匹配时该类型不写）")
     parser.add_argument("--image-manifest", default="",
                         help="图片指纹清单路径，默认 <第一个媒体库目录>/.nfo-backup/image_manifest.json")
     parser.add_argument("--json", dest="json_out", default="", help="把完整报告写入 JSON")
@@ -3907,7 +3688,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
         exclude_paths=[s.strip() for s in re.split(r"[,\n]+", args.exclude) if s.strip()],
         root_types=root_types,
         mode=args.mode,
-        protect_fields={s.strip().casefold() for s in re.split(r"[,\s]+", args.protect) if s.strip()},
+        protect_fields=set(),  # CLI 已移除「保护字段」入口（引擎层能力仍保留）
         only_fields={s.strip().casefold() for s in re.split(r"[,\s]+", args.only) if s.strip()},
         dry_run=args.dry_run,
         backup=not args.no_backup,

@@ -108,11 +108,34 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 >
 > 某一季在线没有海报时会**明确标注缺失**（报告里显示「N 季在线没有海报，已跳过」），并且**绝不回退**用剧集海报或其它季的海报顶替。
 
-> **选图策略（v1.7.7 起与 MP 的取图口径对齐）**：海报 / 背景图 / 徽标来自 TMDB，
-> 挑选规则是**只按语言优先级**（本语言 → 无文字版 → 英文 → 其它），同语言档位内
-> **取 TMDB 返回顺序里的第一条**（TMDB 本身按官方推荐度排序，越靠前越"钦定"）。
-> 早先版本还会比「分辨率越大越好 → 社区评分 → 投票数」，会挑到与 MP 不同的图
-> （表现为"同一部剧两边图不一样"），现已去掉这几级排序。
+> **选图策略（v1.8.0 起，所有图片类型统一）**：海报 / 背景图 / 徽标 / 单集剧照 / 季图等
+> **全部类型共用同一套规则**，两档：
+>
+> 1. **本语言档** —— 取「元数据语言」对应的图（选「简体中文」就是中文图），
+>    档内**按投票数（`vote_count`）从高到低**取；
+> 2. **不限语言档** —— 本语言**一张都没有**时，不再限定语言，
+>    **从全部候选里按投票数从高到低**取。
+>
+> 票数相同时按 TMDB 返回顺序（官方推荐度）取更靠前的那张。
+> 只有在某类型**在线一张图都没有**时才记为缺失、不写这一文件。
+>
+> 为什么第 2 档不再留空：TMDB 上很多老番 / 冷门片根本没人上传中文图
+> （例如《冰菓》的 20 张海报里**一张中文都没有**），留空只会让这一类型永久缺失；
+> 而 `vote_count` 本身就是社区投票，票最高的图客观上是观众最认可的版本。
+>
+> 实测样例（真实 TMDB 数据）：
+> | 条目 | 类型 | 本语言 | 结果 |
+> |---|---|---|---|
+> | 尼古喵喵（312949） | poster | 3 张 | 中文票 [1,1,2] → 取票 2 那张 |
+> | 冰菓（65329） | poster | **0 张** | 第 2 档生效 → 取日文票 7 那张（旧规则会直接留空） |
+> | 权力的游戏（1399） | poster | 26 张 | 最高票那张在**第 2 位** → 正确跳过第一位、取票 16 那张 |
+> | 沙丘 2（693134） | poster | 40 张 | 本语言 + 票数双重生效 → 取票 24 那张 |
+>
+> ⚠️ **与 MP 的一处可解释差异**（不是故障）：MP 对根目录的 `poster` / `backdrop` / `logo`
+> 直接取 TMDB **主记录里那一张**（`MediaInfo.poster_path` / `backdrop_path` / `logo_path`，
+> 即 TMDB 钦定图），本插件则从 `images` 接口的候选里按上面两档规则挑 ——
+> 本语言优先 + 票数择优，能保证拿到**中文**图且是社区认可度最高的那张，
+> 但与 MP 的钦定图不保证逐字节相同。
 >
 > 根目录 / 季目录的 `thumb`、`landscape` 取自 **fanart.tv 的横版缩略图**
 > （`moviethumb` / `tvthumb` / `seasonthumb`），而不是 TMDB 的 `stills`。
@@ -120,14 +143,9 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 > 早先版本把根目录的 thumb 也接到 `stills`，写出来的 `thumb.jpg` 经常是竖图 ——
 > 这是与 MP 的一处偏离，已修正。
 >
-> ⚠️ **与 MP 的两处可解释差异**（不是故障）：
-> 1. **内容可能不同**：MP 对根目录的 `poster` / `backdrop` / `logo` 直接取 TMDB
->    **主记录里那一张**（`MediaInfo.poster_path` / `backdrop_path` / `logo_path`，即 TMDB 钦定图），
->    本插件则从 `images` 接口的候选里按语言挑。语言优先能保证拿到**中文**图
->    （这是刻意的：有中文 logo / 海报时常更好），但与 MP 的钦定图不保证逐字节相同。
-> 2. **产出类型可能不同**：MP 的 `thumb` / `landscape` 靠 fanart 模块动态注入
->    （`tvthumb` → `thumb_path`），**该剧 fanart 没有对应数据时就不写**；
->    本插件同样如此 —— 所以「MP 那边没有 `landscape.jpg`」通常是 fanart 缺数据的正常结果。
+> ⚠️ **另一处可解释差异**：MP 的 `thumb` / `landscape` 靠 fanart 模块动态注入
+> （`tvthumb` → `thumb_path`），**该剧 fanart 没有对应数据时就不写**；
+> 本插件同样如此 —— 所以「MP 那边没有 `landscape.jpg`」通常是 fanart 缺数据的正常结果。
 
 > **图片来源优先级（`image_sources`，v1.7.7 新增）**：同一类图两个源都能提供时，按设定顺序取
 > **第一个命中**的，没给的留给下一个源兜底。默认 **`tmdb,fanart`（TMDB 优先，fanart.tv 其次）**，
@@ -216,8 +234,11 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 ## 三层保护
 
 1. **NFO 内锁定** —— 遵循 Kodi 语义，遇到 `<lockdata>true</lockdata>` 或 `<lockedfields>` 时跳过对应字段与图片（可用 `respect_lock` 关闭）。
-2. **保护字段** —— 配置 `protect_fields` 的字段（如 `plot,actor`）永远只补不换，保住你手工润色的内容。
+2. **只补缺失** —— `mode=gapfill` 时已有内容一律不动，只补空缺（想保住手工润色内容时用这个）。
 3. **演练模式** —— `dry_run` 下只生成「将要修改」的清单，不落盘。
+
+> v1.8.0 起配置页不再提供「保护字段」，常见诉求请用第 2 条。
+> 引擎层的 `EngineConfig.protect_fields` 精细语义仍然保留（见上文）。
 
 此外，写入前可选自动备份到 `<媒体库根目录>/.nfo-backup/`（NFO 与图片都会备份，首次备份为准）。
 
@@ -291,10 +312,8 @@ docker restart moviepilot-v2
 | `cast_limit` | `20` | 演员写入上限，可选 `10` / `20` / `30` / `50` / **全部**（`0` = 不限制） |
 | `paths` | 空 | 媒体库目录，每行一个；**行尾可加 `#电影` / `#电视剧` 限定该目录的类型**（见下） |
 | `exclude_paths` | 空 | 排除路径片段，命中即跳过 |
-| `protect_fields` | 空 | 保护字段：照常比对，但**只补不换**，永不覆盖已有内容 |
 | `tmdb_api_key` | 空 | TMDB API Key。**留空 = 自动读取 MoviePilot 里配置的 `TMDB_API_KEY`** |
-| `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`） |
-| `cert_country` | `US` | 分级地区码，**单选下拉**：决定 NFO 的 `<mpaa>` 取哪个地区的分级（见下） |
+| `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`）。**同时是选图的第一优先语言**（见上） |
 | `image_mode` | `sync` | 图片处理：`sync` / `missing` / `off`，见上节 |
 | `tmdb_image_kinds` | 四项全选 | **TMDB 提供的图片类型**（多选下拉）：海报 / 背景图 / 徽标 / 剧集缩略图（单集剧照） |
 | `fanart_image_kinds` | 五项全选 | **fanart.tv 提供的图片类型**（多选下拉）：横版缩略图 / 横幅图 / 光盘图 / 透明艺术图 / 别名 landscape |
@@ -332,37 +351,23 @@ docker restart moviepilot-v2
 
 CLI 同样支持：`--root "/media/link/电影#电影"`。
 
-### 保护字段（`protect_fields`）
+### 分级地区码固定为美国（`cert_country`）
 
-**照常参与比对、缺失也会补，但永远不会覆盖你已有的内容。** 想保住手工润色的简介、
-自己写的一句话宣传语，就把对应字段填进来（逗号分隔）。
+NFO 里的 `<mpaa>` 标签存的其实是**影视分级**（`PG-13`、`R` 这类），
+本插件**固定取美国（US）地区的分级**，配置页里已不再提供下拉框。
 
-> ℹ️ v1.2.0 曾有一个「字段白名单」用来收窄处理范围，按用户反馈已在 v1.4.0 移除。
-> 该能力仍保留在引擎与 CLI 的 `--only` 参数里。
+> 若某部片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，**不会留空**。
+> 引擎层仍保留 `cert_country` 参数（默认 `US`），需要改地区时可直接构造
+> `TmdbProvider(..., cert_country="JP", ...)`。
 
-字段名用 NFO 的标签名（小写、逗号分隔）。可用的字段：
+### 保护字段已从配置页移除（`protect_fields`）
 
-- **电影**：`title` `originaltitle` `plot` `tagline` `year` `premiered` `runtime` `mpaa` `rating` `genre` `studio` `country` `director` `credits` `actor`
-- **剧集 tvshow**：`title` `plot` `tagline` `year` `premiered` `runtime` `mpaa` `rating` `genre` `studio` `country` `actor`
-- **单集 episode**：`title` `plot` `aired` `rating` `season` `episode` `director` `credits` `actor`
-- **季 season**：`title` `plot` `premiered` `season`
+v1.8.0 起**配置页与 CLI 都不再暴露「保护字段」**（按用户反馈移除）。
+常见诉求请改用**「只补缺失」**模式（`mode=gapfill`）：已有内容一律不动，只补空缺。
 
-### 分级地区码（`cert_country`）到底管什么
-
-配置页里它是**单选下拉框，只能选一个地区**（列了 13 个常用地区）。
-
-NFO 里的 `<mpaa>` 标签存的其实是**影视分级**（`PG-13`、`R` 这类），而 TMDB 上同一部片在不同国家分级并不一样，
-这个配置就决定取哪一份：
-
-| 填什么 | `<mpaa>` 可能得到 |
-| --- | --- |
-| `US`（默认） | `PG-13` / `R` / `PG` |
-| `GB` | `12` / `15` / `18` |
-| `JP` | `G` / `PG12` / `R15+` |
-| `DE` | `FSK 12` / `FSK 16` |
-
-> 中国大陆没有官方影视分级体系，填 `CN` 通常取不到值。若所选地区恰好缺该片的分级，
-> 会自动退回到任意有值的地区，**不会留空**。
+> 引擎层 `EngineConfig.protect_fields` 的能力仍保留，需要「照常比对、缺失补齐、
+> 但永不覆盖已有内容」这种精细语义时，可直接在代码里构造引擎配置使用
+> （`protect_fields={"plot", "tagline"}`）。
 
 **建议首跑流程**：`mode=report` + `dry_run=开` → 详情页会列出**将要修改哪些文件** → 确认无误后切 `mode=sync`。
 图片若担心首轮流量，可先设 `image_mode=missing` 只补空缺。
