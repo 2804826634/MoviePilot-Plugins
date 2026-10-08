@@ -835,12 +835,21 @@ check("① 季海报写入季目录：Season 01/poster.jpg",
 check("② 剧集根目录里不会出现 seasonNN-poster.jpg（不再集中堆放）",
       root_season_posters() == [], str(root_season_posters()))
 
-# 旧版残留：只检测 + 提示，绝不擅自删除用户的文件
+# 旧版残留（剧集目录下的 seasonNN-poster.jpg）：新版**完全不检测、不处理、不告警**，
+# 当它不存在 —— 照样正常写季目录的 poster.jpg，且残留文件原样不动。
 legacy_file = show_dir / "season01-poster.jpg"
+if legacy_file.exists():
+    legacy_file.unlink()
 shutil.copy(FIX.parent / "images" / "poster_wrong.png", legacy_file)
+legacy_before = legacy_file.read_bytes()
+(season_dir / "poster.jpg").unlink(missing_ok=True)
 report_b = run_season("b")
-check("③ 旧版残留被检测并记入报告，且文件仍在（不擅自删除）",
-      report_b.legacy_alias >= 1 and legacy_file.exists(), f"legacy={report_b.legacy_alias}")
+check("③ 存在旧版残留时，仍正常写入季目录 poster.jpg（互不干扰）",
+      (season_dir / "poster.jpg").exists(), str(sorted(p.name for p in season_dir.iterdir())))
+check("③ 旧版残留文件被完全无视：内容原样、报告里也不出现该概念",
+      legacy_file.exists() and legacy_file.read_bytes() == legacy_before
+      and not hasattr(report_b, "legacy_alias"),
+      f"legacy_exists={legacy_file.exists()}")
 legacy_file.unlink()
 
 # 该季在线没有任何图片素材 → 明确标注缺失，且绝不回退用剧集/别季海报

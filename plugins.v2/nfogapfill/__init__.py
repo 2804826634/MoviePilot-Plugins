@@ -181,7 +181,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.7.2"
+PLUGIN_VERSION = "1.7.3"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -1603,7 +1603,6 @@ class Report:
     scrubbed: int = 0             # 清理掉的「对象字面量」历史脏值节点数
     retried: int = 0              # 网络失败后自动重试的次数
     images_missing: int = 0       # 在线没有对应图片、且拒绝回退的季海报数
-    legacy_alias: int = 0         # 检测到的旧版 seasonNN-poster.jpg 残留数
     unresolved: int = 0           # 拿不到在线数据
     failed: int = 0
     counts: Dict[str, int] = field(default_factory=dict)    # 差异判定统计
@@ -1657,9 +1656,6 @@ class Report:
                          f"（重试后仍失败的条目会记在下方）")
         if self.images_missing:
             lines.append(f"{self.images_missing} 季在线没有海报，已跳过（不回退其它季或剧集海报）")
-        if self.legacy_alias:
-            lines.append(f"检测到 {self.legacy_alias} 个旧版残留的「剧集目录/seasonNN-poster.jpg」，"
-                         f"新版只写「季目录/poster.jpg」，这些旧文件可自行删除")
         if self.counts:
             lines.append("差异判定：" + "｜".join(f"{k} {v}" for k, v in self.counts.items()))
         if self.applied:
@@ -1834,7 +1830,6 @@ class Engine:
         self.manifest = ImageManifest(cfg.manifest_path)
         self._warned_junk: set = set()      # 脏值告警去重，避免刷屏
         self._lock = threading.Lock()       # 保护 _warned_junk 等并发共享状态
-        self._legacy_seen: set = set()      # 旧版季海报残留：按剧集目录去重告警
 
     def sanitize_remote(self, field: str, values: List[str]) -> List[str]:
         """护栏：拦掉「结构化对象被 str() 出来」的脏值。
@@ -2039,11 +2034,6 @@ class Engine:
                     f"无差异 {self.report.untouched}；图片检查 {self.report.images_scanned}，"
                     f"写入 {self.report.images_written}"
                     + (f"；网络重试 {self.report.retried} 次" if self.report.retried else ""))
-        if self.report.legacy_alias:
-            logger.warning(
-                f"发现 {self.report.legacy_alias} 个旧版残留的 seasonNN-poster.jpg（剧集目录下）。"
-                f"新版只在季目录内写 poster.jpg，这些旧文件可自行删除 —— 例如："
-                f"find <媒体库> -maxdepth 3 -name 'season*-poster.jpg' -delete")
         if self.report.unresolved >= 5:
             logger.warning(
                 f"本轮有 {self.report.unresolved} 个条目取不到在线数据"
@@ -2239,19 +2229,6 @@ class Engine:
         targets = image_targets(nfo, self.cfg.image_kinds, season=season)
         if not targets:
             return 0
-        # 旧版会把季海报在剧集根目录另存一份 seasonNN-poster.jpg；新版不再写，
-        # 这里只做「检测 + 提示」，绝不擅自删除用户库里的文件
-        if nfo.media_type == "season" and season is not None:
-            try:
-                legacy = nfo.path.parent.parent / f"season{int(season):02d}-poster.jpg"
-            except (TypeError, ValueError):
-                legacy = None
-            if legacy is not None and legacy.exists():
-                self.report.bump("legacy_alias")
-                if legacy.parent not in self._legacy_seen:
-                    self._legacy_seen.add(legacy.parent)
-                    logger.warning(f"检测到旧版写法残留的季海报：{legacy} —— "
-                                   f"新版只写「季目录/poster.jpg」，这个文件可自行删除")
         urls = self.fetch_remote_images(nfo, {spec.kind for spec, _ in targets})
         if not urls:
             # 一季可能在线什么素材都没有。以前这里直接返回什么都不记，

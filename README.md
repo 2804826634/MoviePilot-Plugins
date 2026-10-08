@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.7.2-blue)
+![version](https://img.shields.io/badge/version-1.7.3-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -90,7 +90,7 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 | 横版缩略图（landscape） | `landscape.jpg` | 电影、剧集、季目录 | **fanart.tv** `moviethumb` / `tvthumb` |
 | 季海报 | **`<季目录>/poster.jpg`（只此一处）** | 季 | TMDB `posters`（**跟随「海报」一起处理，不单独成项**） |
 
-> **季海报的落盘规则（v1.7.0 起）**：一季一图、各归其位 —— 只写在该季自己的目录里，统一命名为 `poster.jpg`；**不再往剧集根目录写 `seasonNN-poster.jpg`**（那会把各季海报堆到同一个目录）。
+> **季海报的落盘规则（v1.7.0 起）**：一季一图、各归其位 —— 只写在该季自己的目录里，统一命名为 `poster.jpg`；**不再往剧集根目录写 `seasonNN-poster.jpg`**（那会把各季海报堆到同一个目录）。旧版可能已经在剧集根目录留下了这类文件，**插件完全不理会它们**（不检测、不删除、不告警，当它不存在）—— 真正被读取的是各季目录里的 `poster.jpg`，留着不影响使用。
 > 某一季在线没有海报时会**明确标注缺失**（报告里显示「N 季在线没有海报，已跳过」），并且**绝不回退**用剧集海报或其它季的海报顶替。
 
 ### fanart.tv 那几类怎么配置
