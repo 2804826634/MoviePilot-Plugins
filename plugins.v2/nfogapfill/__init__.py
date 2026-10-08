@@ -253,6 +253,42 @@ IMAGE_KIND_CN = {
 
 IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
 
+# ── 图片来源优先级 ─────────────────────────────────────────────────────
+# 每类图优先去哪个源取。默认「TMDB 优先、fanart.tv 其次」：
+# 同一类图若两个源都有，先用 TMDB 的；TMDB 没有（或这次没取到）才落到 fanart。
+#
+# 注意**数据源的实际能力**（决定优先级能起多大作用）：
+#   - TMDB 只有 posters / backdrops / logos（单集另有 stills 剧照）；
+#   - fanart.tv 才有 banner / disc / clearart，以及横版缩略图 thumb/landscape
+#     （moviethumb / tvthumb）。
+# 所以 banner / disc / clearart / thumb / landscape 这几类**只有 fanart 有**，
+# 优先级表里给它们同时写上两个源，实际也只会在 fanart 命中 —— 但表意完整、
+# 以后哪个源补上了新类型也能自动吃到。
+IMAGE_SOURCES: Tuple[str, ...] = ("tmdb", "fanart")
+IMAGE_SOURCE_CN = {"tmdb": "TMDB", "fanart": "fanart.tv"}
+
+
+def image_source_order(raw: Any = None) -> List[str]:
+    """把配置收敛成有序的来源列表，默认 `["tmdb", "fanart"]`。
+
+    容忍三种写法：列表 / 逗号字符串 / None。认不出的项直接丢掉；全认不出时
+    回退默认顺序（绝不返回空列表，否则图片会一张都不取）。
+    """
+    if raw is None:
+        return list(IMAGE_SOURCES)
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(x).strip().lower() for x in raw]
+    else:
+        parts = [x.strip().lower() for x in re.split(r"[,\s]+", str(raw))]
+    picked = [p for p in parts if p in IMAGE_SOURCES]
+    # 去重且保序
+    seen, ordered = set(), []
+    for p in picked:
+        if p not in seen:
+            seen.add(p)
+            ordered.append(p)
+    return ordered or list(IMAGE_SOURCES)
+
 UA = f"NfoGapFill/{PLUGIN_VERSION} (+MoviePilot plugin)"
 
 
@@ -1297,12 +1333,15 @@ class TmdbProvider:
 
     def __init__(self, api_key: str, language: str = "zh-CN", proxy: Optional[str] = None,
                  cert_country: str = "US", cast_limit: int = 20,
-                 image_quality: str = "standard", concurrency: int = 1):
+                 image_quality: str = "standard", concurrency: int = 1,
+                 source_order: Any = None):
         self.api_key = api_key
         self.language = language
         self.cert_country = (cert_country or "US").upper()
         self.cast_limit = cast_limit
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
+        # 图片来源优先级（默认 TMDB → fanart.tv）
+        self.source_order = image_source_order(source_order)
         # 图片域名跟随宿主配置（国内直连 image.tmdb.org 经常超时，MP 允许换镜像）
         self.img_host = image_host()
         # 接口域名同理可覆盖（默认 api.themoviedb.org；被拦时可换 api.tmdb.org）
@@ -1501,7 +1540,28 @@ class TmdbProvider:
 
     def fetch_images(self, tmdb_id: str, media_type: str, season: Optional[str] = None,
                      episode: Optional[str] = None, kinds: Any = ()) -> Dict[str, str]:
-        """返回 {图片类型: 在线地址}。拿不到的图片类型不会出现在结果里。"""
+        """返回 {图片类型: 在线地址}。拿不到的图片类型不会出现在结果里。
+
+        按 `self.source_order`（默认 TMDB → fanart.tv）**依次**补齐：
+        第一个源给了某类图就用它，没给的留给下一个源。这样「图片内容偏好」
+        就集中在一张表里，不用在代码里到处 if。
+        """
+        out: Dict[str, str] = {}
+        for source in self.source_order:
+            if source == "tmdb":
+                self._fetch_tmdb_images(tmdb_id, media_type, season, episode,
+                                        kinds, out)
+            elif source == "fanart":
+                self._fetch_fanart_images(tmdb_id, media_type, season, kinds, out)
+        return out
+
+    def _fetch_tmdb_images(self, tmdb_id: str, media_type: str, season: Optional[str],
+                           episode: Optional[str], kinds: Any,
+                           out: Dict[str, str]) -> None:
+        """从 TMDB 补 poster / backdrop / logo（单集另有 stills 剧照）。
+
+        已经在 out 里的类型不再覆盖 —— 「先到先得」即优先级。
+        """
         lang = (self.language or "").split("-")[0].lower()
         include = ",".join([part for part in (lang, "en", "null") if part])
         if media_type == "movie":
@@ -1513,33 +1573,42 @@ class TmdbProvider:
         elif media_type == "episodedetails" and season and episode:
             path = f"/tv/{tmdb_id}/season/{season}/episode/{episode}/images"
         else:
-            return {}
+            return
         data = self._get(path, include_image_language=include)
         if not data:
-            return {}
-        out: Dict[str, str] = {}
+            return
         # 单集的缩略图是「这一集的剧照」，走 TMDB 的 stills（与根目录的横版缩略图不同）
         episode_thumb_key = "stills" if media_type == "episodedetails" else None
         for kind in kinds:
+            if kind in out:
+                continue
             api_key = IMG_API_KEYS.get(kind) or (episode_thumb_key if kind == "thumb" else None)
             if not api_key:
                 # 电影/剧集/季的 thumb 不在 TMDB 的键里（TMDB 的 stills 是剧照，
-                # 不是横版缩略图），交给下面走 fanart 的 tvthumb / moviethumb
+                # 不是横版缩略图），留给 fanart 的 tvthumb / moviethumb
                 continue
             best = pick_best_image(data.get(api_key) or [], self.language)
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
+
+    def _fetch_fanart_images(self, tmdb_id: str, media_type: str, season: Optional[str],
+                             kinds: Any, out: Dict[str, str]) -> None:
+        """从 fanart.tv 补 TMDB 没有 / 没取到的那几类图。
+
+        已经在 out 里的类型不再覆盖（TMDB 优先）。季走专用的按季号筛选接口。
+        """
         # 季：TMDB 只给 poster，banner / thumb 得去 fanart 的
         # seasonposter / seasonbanner / seasonthumb 取（按季号筛选）
         if media_type == "season" and season:
-            season_missing = {k for k in kinds if k in FANART_SEASON_KEYS and k not in out}
+            season_missing = {k for k in kinds
+                              if k in FANART_SEASON_KEYS and k not in out}
             if season_missing:
                 tvdb_id = self._tvdb_id(tmdb_id)
                 if tvdb_id and self.fanart_key:
                     for kind, url in fanart_season_image_urls(
                             season_missing, season, tvdb_id, self.fanart_key).items():
                         out.setdefault(kind, url)
-            return out
+            return
         # TMDB 只有海报 / 背景图 / 徽标；缩略图（横版）、光盘图、横幅图、透明艺术图
         # 只有 fanart.tv 提供，需要额外查一次（电影按 tmdbid，剧集按 thetvdb id）。
         fanart_media_type = "movie" if media_type == "movie" else "tvshow"
@@ -1558,7 +1627,6 @@ class TmdbProvider:
                                                self.fanart_key,
                                                fanart_media_type).items():
                 out.setdefault(kind, url)
-        return out
 
     def _tvdb_id(self, tmdb_id: str) -> str:
         """由 TMDB id 查 thetvdb id —— fanart.tv 的剧集接口只认 tvdb id。"""
@@ -2639,6 +2707,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _image_mode: str = IMG_SYNC
     _image_kinds: Any = IMAGE_KINDS          # 统一由 normalize_image_kinds 收敛成列表
     _image_quality: str = "standard"
+    _image_sources: Any = IMAGE_SOURCES      # 统一由 image_source_order 收敛成有序列表
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
 
@@ -2671,6 +2740,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             if config.get("image_kinds") != self._image_kinds:
                 repair["image_kinds"] = self._image_kinds
             self._image_quality = config.get("image_quality") or "standard"
+            # 图片来源优先级：收敛成有序列表，非法值顺手修正回默认
+            self._image_sources = image_source_order(config.get("image_sources"))
 
         self.stop_service()
 
@@ -2815,6 +2886,28 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                         {"title": "标准（海报 w780 / 背景 w1280，省空间）", "value": "standard"},
                                         {"title": "原始尺寸（最清晰，体积明显更大）", "value": "original"},
                                     ]}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "image_sources",
+                                    "label": "图片来源优先级",
+                                    "items": [
+                                        {"title": "TMDB 优先，fanart.tv 其次（推荐）", "value": "tmdb,fanart"},
+                                        {"title": "fanart.tv 优先，TMDB 其次", "value": "fanart,tmdb"},
+                                        {"title": "只用 TMDB（不做 fanart 兜底）", "value": "tmdb"},
+                                        {"title": "只用 fanart.tv（不做 TMDB 兜底）", "value": "fanart"},
+                                    ]}}]},
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "同一类图两个源都有时，按这里的顺序取第一个命中的。"
+                                         "注意数据源本身的差别：TMDB 只提供海报 / 背景图 / 徽标"
+                                         "（单集另有剧照），而横幅图、光盘图、透明艺术图、横版缩略图"
+                                         "（thumb / landscape）**只有 fanart.tv 有** —— 这几类无论"
+                                         "顺序如何都只能取到 fanart 的。"}]},
                         ],
                     },
                     {
@@ -3272,9 +3365,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             logger.info("TMDB 数据源：%s%s" % (
                 "插件内单独配置的 API Key" if own_key else "自动读取 MoviePilot 中配置的 API Key",
                 "，代理沿用宿主的" if proxy else ""))
+            logger.info("图片来源优先级：" + " → ".join(
+                IMAGE_SOURCE_CN.get(s, s) for s in self._image_sources))
             return TmdbProvider(key, self._language, proxy or None,
                                 self._cert_country, limit, quality,
-                                concurrency=self._concurrency)
+                                concurrency=self._concurrency,
+                                source_order=self._image_sources)
         logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
                        "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
         return HostProvider(quality, limit)
@@ -3398,8 +3494,11 @@ def build_cli_provider(args) -> Any:
         return HostProvider(args.image_quality, args.cast_limit)
     if not args.api_key:
         raise SystemExit("--source tmdb 需要 --api-key，或设置环境变量 TMDB_API_KEY")
+    order = image_source_order(args.image_sources)
+    logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
     return TmdbProvider(args.api_key, args.lang, args.proxy or None, args.cert_country,
-                        args.cast_limit, args.image_quality)
+                        args.cast_limit, args.image_quality,
+                        source_order=order)
 
 
 def cli_main(argv: Optional[List[str]] = None) -> int:
@@ -3441,6 +3540,8 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                         help="处理的图片类型，逗号分隔（默认四种全开）")
     parser.add_argument("--image-quality", choices=["standard", "original"], default="standard",
                         help="图片画质，默认 standard（海报 w780 / 背景图 w1280 / 徽标 w500）")
+    parser.add_argument("--image-sources", default="tmdb,fanart",
+                        help="图片来源优先级，逗号分隔，默认 tmdb,fanart（TMDB 优先，fanart 兜底）")
     parser.add_argument("--image-manifest", default="",
                         help="图片指纹清单路径，默认 <第一个媒体库目录>/.nfo-backup/image_manifest.json")
     parser.add_argument("--json", dest="json_out", default="", help="把完整报告写入 JSON")

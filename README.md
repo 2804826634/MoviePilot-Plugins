@@ -129,6 +129,16 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 >    （`tvthumb` → `thumb_path`），**该剧 fanart 没有对应数据时就不写**；
 >    本插件同样如此 —— 所以「MP 那边没有 `landscape.jpg`」通常是 fanart 缺数据的正常结果。
 
+> **图片来源优先级（`image_sources`，v1.7.7 新增）**：同一类图两个源都能提供时，按设定顺序取
+> **第一个命中**的，没给的留给下一个源兜底。默认 **`tmdb,fanart`（TMDB 优先，fanart.tv 其次）**，
+> 可切换为 `fanart,tmdb`、`tmdb`（只用 TMDB）、`fanart`（只用 fanart）。
+> 日志里会打印本轮实际使用的顺序（`图片来源优先级：TMDB → fanart.tv`）。
+>
+> ⚠️ **优先级只对「两边都有」的类型起作用**。数据源本身能力不同：
+> TMDB 只有 `posters` / `backdrops` / `logos`（单集另有 `stills` 剧照）；
+> 而**横幅图、光盘图、透明艺术图、横版缩略图（thumb / landscape）只有 fanart.tv 有**。
+> 所以这几类无论顺序如何都只能取 fanart 的 —— 别以为「换成 fanart 优先后海报变了」。
+
 ### fanart.tv 那几类怎么配置
 
 光盘图 / 横幅图 / 透明艺术图 / 横版缩略图 **只有 fanart.tv 有**（TMDB 只提供 海报 / 背景图 / 徽标 / 剧照）。
@@ -286,6 +296,7 @@ docker restart moviepilot-v2
 | `image_mode` | `sync` | 图片处理：`sync` / `missing` / `off`，见上节 |
 | `image_kinds` | 四种全选 | 处理的图片类型，**多选下拉**：海报 / 背景图 / 徽标 / 剧集缩略图（全不选 = 不处理图片） |
 | `image_quality` | `standard` | 画质档：`standard`（海报 w780 / 背景图 w1280 / 徽标 w500）或 `original`（最清晰、体积大） |
+| `image_sources` | `tmdb,fanart` | **图片来源优先级**：`tmdb,fanart`（TMDB 优先）/ `fanart,tmdb` / `tmdb`（只用 TMDB）/ `fanart`（只用 fanart） |
 
 > 🔧 **升级自 v1.2.0 的会自动修好一个历史脏值**：那一版用复选框渲染图片类型，而宿主当时把它当单值处理，
 > 于是配置里存成了 `true` / `false`，界面上会冒出一个写着 `false` 的怪 chip。
@@ -404,7 +415,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季图双落点）
-python tests/_self_test_plugin.py   # 插件面 213 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试与域名覆盖/图片备用源/MP 图片类型与命名对齐）
+python tests/_self_test_plugin.py   # 插件面 224 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试与域名覆盖/图片备用源/来源优先级/MP 图片类型与命名对齐）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、

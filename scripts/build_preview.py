@@ -245,6 +245,7 @@ def main():
             f'<span class="chip">电影 <b>{len(groups["电影"])}</b> 张</span>'
             f'<span class="chip">电视剧 <b>{len(groups["电视剧"])}</b> 张</span>'
             f'<span class="chip">来源 <b>TMDB + fanart.tv</b></span>'
+            f'<span class="chip">来源优先级 <b>TMDB 优先 → fanart.tv 其次</b></span>'
             f'<span class="chip">图片源 <b>original 原图</b></span>')
     meta_js = json.dumps(meta, ensure_ascii=False).replace("</", "<\\/")
     html.append("<script>document.getElementById('meta').innerHTML="
@@ -296,6 +297,15 @@ def main():
         '剧集（tvshow / season / episode）本就不包含光盘图。插件严格照搬这套规则，'
         '所以上面电视剧那一组不会出现 disc。同理，本轮的 <b>thumb.jpg 与 landscape.jpg '
         '字节完全相同</b>，因为 MP 里它们本就是同一张横版图的两个名字（别名关系）。</div>')
+
+    body.append(
+        '<div class="note"><b>关于「来源优先级」—— 上面那栏「来源」列是按优先级逐源取到的结果。</b><br>'
+        '本轮用的顺序是 <b>TMDB 优先 → fanart.tv 其次</b>：'
+        '海报 / 背景图 / 徽标 由 TMDB 提供（<code>image.tmdb.org</code>），'
+        '而横幅图 / 光盘图 / 透明艺术图 / 横版缩略图（thumb、landscape）**只有 fanart.tv 有**，'
+        '所以这几类无论顺序如何都取自 fanart（<code>assets.fanart.tv</code>）。'
+        '若把优先级改成 fanart 优先，海报 / 背景图 / 徽标 会改取 fanart 的对应图 —— '
+        '但 fanart 没有剧集/电影通用海报键时仍会落回 TMDB。</div>')
 
     # 落盘结构树，便于人工核对「季图双落点」是否真的落在两处
     body.append("<h2>实际落盘结构</h2>")

@@ -1,9 +1,30 @@
-## NfoGapFill v1.7.7 — 修「图片能选出来却下不下来」与 fanart Key 失效
+## NfoGapFill v1.7.7 — 图片来源优先级 + 三处网络环境适配修复
 
-本版修的都是**真实网络环境下端到端刮削时暴露的环境适配问题**，功能行为与 v1.7.6 的图片口径完全一致，
-只是让它在被拦的网络里也能真正跑通。三处修正：
+本版新增一个**图片来源优先级**设置，并修了三处**真实网络环境下端到端刮削时暴露的环境适配问题**。
+功能行为与 v1.7.6 的图片口径一致，只是把「优先用哪个源」变成可配、并让它在被拦的网络里也能真正跑通。
 
-### ① TMDB 接口域名可覆盖（`TMDB_API_DOMAIN`）
+### ① 新增：图片来源优先级（默认 TMDB 优先，fanart.tv 其次）
+
+同一类图若两个源都能提供，按设定顺序取**第一个命中**的；没给的留给下一个源兜底。
+设置项 `image_sources` 支持四种选择（CLI 对应 `--image-sources`）：
+
+| 取值 | 含义 |
+| --- | --- |
+| `tmdb,fanart` | **默认**：TMDB 优先，fanart.tv 兜底 |
+| `fanart,tmdb` | fanart.tv 优先，TMDB 兜底 |
+| `tmdb` | 只用 TMDB（不做 fanart 兜底） |
+| `fanart` | 只用 fanart.tv（不做 TMDB 兜底） |
+
+> **要注意数据源本身的能力差异**，否则会以为「换了顺序怎么没变」：
+> TMDB 只有 `posters` / `backdrops` / `logos`（单集另有 `stills` 剧照）；
+> 而**横幅图、光盘图、透明艺术图、横版缩略图（thumb / landscape）只有 fanart.tv 有**
+> （`moviebanner` / `moviedisc` / `hdclearart` / `moviethumb` / `tvthumb`）。
+> 所以这几类**无论顺序如何都只能取到 fanart 的** —— 优先级只对「两边都有」的类型起作用。
+
+实测（沙丘 438631，默认 `tmdb,fanart`）：`poster` 取自 `image.tmdb.org`（TMDB），
+`thumb` 取自 `assets.fanart.tv`（TMDB 没有横版缩略图，自然落到 fanart）。
+
+### ② TMDB 接口域名可覆盖（`TMDB_API_DOMAIN`）
 
 **根因**：接口地址此前是硬编码的 `https://api.themoviedb.org/3`。而 `api.themoviedb.org`
 在部分地区会被 DNS / 网关整段拦掉，日志里表现为：
@@ -26,7 +47,7 @@ TMDB_API_DOMAIN=api.tmdb.org
 export TMDB_API_DOMAIN=api.tmdb.org
 ```
 
-### ② 图片下载自动换备用源
+### ③ 图片下载自动换备用源
 
 TMDB 的图片域名 `image.tmdb.org` 被整段拦掉时，报错是：
 
@@ -42,7 +63,7 @@ TMDB 的图片域名 `image.tmdb.org` 被整段拦掉时，报错是：
 > **不会乱换源**：用户自定义了 `TMDB_IMAGE_DOMAIN`（镜像/反代）时以用户为准，
 > 插件不会再偷偷替换成别的域名；fanart.tv 的地址也不受影响。
 
-### ③ fanart.tv Key 三级回退
+### ④ fanart.tv Key 三级回退
 
 **根因**：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图都来自 fanart.tv，而 Key 此前**只读宿主设置**
 （`mp_setting("FANART_API_KEY")`）。于是两种情况下会被误判成「没 Key」而**静默跳过**这几类图：
@@ -59,7 +80,7 @@ TMDB 的图片域名 `image.tmdb.org` 被整段拦掉时，报错是：
 
 **修法**：按「宿主设置 `FANART_API_KEY` → 环境变量 `FANART_API_KEY` → MP 内置默认 Key」逐级回退。
 
-### 验证
+### 验证（v1.7.7 修完后的真实环境复跑）
 
 在真实网络环境（`api.themoviedb.org` 被拦、`image.tmdb.org` 被拦）对
 《沙丘 (2021)》(tmdbid 438631) 与《怪奇物语》(tvdb 转 tmdbid 66732) 第 1 季
@@ -78,4 +99,4 @@ TMDB 的图片域名 `image.tmdb.org` 被整段拦掉时，报错是：
 
 - **纯增量修复**，不改变 v1.7.6 的图片类型、命名与取图口径；不设 `TMDB_API_DOMAIN` 时行为与 v1.7.6 完全一致。
 - 升级后若你此前因「没 Key」缺了横幅图 / 光盘图 / 横版缩略图，下一轮运行会自动补上。
-- 自检：引擎 65 项 + 插件面 213 项断言全绿。
+- 自检：引擎 65 项 + 插件面 224 项断言全绿（新增 11 项图片来源优先级断言）。

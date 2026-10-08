@@ -1062,6 +1062,7 @@ try:
           s1.get("poster") == "http://a/s1p.jpg"
           and s1.get("banner") == "http://a/s1b.jpg"
           and s1.get("thumb") == "http://a/s1t.jpg", str(s1))
+
     check("季图片语言偏好同样生效（zh 优先于票数更高的 en）",
           s1.get("thumb") == "http://a/s1t.jpg", str(s1))
 
@@ -1087,6 +1088,72 @@ try:
 finally:
     module.mp_setting = _orig_mp
 check("恢复后语言偏好回到默认 zh,en", module.fanart_lang_order() == ["zh", "en"])
+
+print()
+print("=" * 70)
+print("图片来源优先级：默认 TMDB 优先、fanart.tv 其次（可配置）")
+print("=" * 70)
+check("image_source_order 默认 TMDB -> fanart",
+      module.image_source_order(None) == ["tmdb", "fanart"])
+check("逗号字符串能解析成有序列表",
+      module.image_source_order("fanart,tmdb") == ["fanart", "tmdb"])
+check("列表也能解析（去重且保序）",
+      module.image_source_order(["fanart", "tmdb", "fanart"]) == ["fanart", "tmdb"])
+check("单个来源也接受（只用 tmdb）",
+      module.image_source_order("tmdb") == ["tmdb"])
+check("认不出的值直接丢掉；全认不出时回退默认（绝不返回空）",
+      module.image_source_order(["weird", "  "]) == ["tmdb", "fanart"])
+check("IMAGE_SOURCES 常量就是两者",
+      set(module.IMAGE_SOURCES) == {"tmdb", "fanart"})
+
+# 构造一个能同时从 TMDB 与 fanart 拿到 poster 的 provider，验证「先到先得」
+class _PriorityProvider(module.TmdbProvider):
+    """把两个源的取图结果都拦下来，只验证顺序（不发真实请求）。"""
+
+    def __init__(self, order):
+        self.api_key = "K"
+        self.language = "zh-CN"
+        self.fanart_key = "FANART"
+        self.source_order = module.image_source_order(order)
+        self.img_host = "https://image.tmdb.org/t/p/"
+        self.calls = []
+
+    def image_size(self, kind):
+        return "w500"
+
+    def _get(self, path, **params):
+        return {"posters": [{"file_path": "/tmdb.jpg", "iso_639_1": "zh"}]}
+
+    def _tvdb_id(self, tmdb_id):
+        return "999"
+
+    def _fetch_fanart_images(self, tmdb_id, media_type, season, kinds, out):
+        self.calls.append("fanart")
+        out.setdefault("poster", "https://assets.fanart.tv/poster.jpg")
+
+    def _fetch_tmdb_images(self, tmdb_id, media_type, season, episode, kinds, out):
+        self.calls.append("tmdb")
+        out.setdefault("poster", "https://image.tmdb.org/t/p/w500/tmdb.jpg")
+
+
+p_tmdb_first = _PriorityProvider("tmdb,fanart")
+res_tmdb = p_tmdb_first.fetch_images("812", "movie", kinds=["poster"])
+check("TMDB 优先时 poster 取 TMDB 的图",
+      res_tmdb.get("poster") == "https://image.tmdb.org/t/p/w500/tmdb.jpg", str(res_tmdb))
+check("TMDB 优先时先问 TMDB 再问 fanart",
+      p_tmdb_first.calls == ["tmdb", "fanart"], str(p_tmdb_first.calls))
+
+p_fanart_first = _PriorityProvider("fanart,tmdb")
+res_fa = p_fanart_first.fetch_images("812", "movie", kinds=["poster"])
+check("改成 fanart 优先后 poster 取 fanart 的图（TMDB 不再覆盖）",
+      res_fa.get("poster") == "https://assets.fanart.tv/poster.jpg", str(res_fa))
+check("fanart 优先时先问 fanart 再问 TMDB",
+      p_fanart_first.calls == ["fanart", "tmdb"], str(p_fanart_first.calls))
+
+p_tmdb_only = _PriorityProvider("tmdb")
+p_tmdb_only.fetch_images("812", "movie", kinds=["poster"])
+check("只配 tmdb 时不会再问 fanart",
+      p_tmdb_only.calls == ["tmdb"], str(p_tmdb_only.calls))
 
 print()
 print("=" * 70)
@@ -1306,10 +1373,10 @@ check("季专用 fanart 键与 MP 的 seasonposter/seasonbanner/seasonthumb 对�
       and module.FANART_SEASON_KEYS["thumb"] == ("seasonthumb",))
 
 # 单集的缩略图必须是「这一集的剧照」(TMDB stills)，不能被根目录那套 fanart 逻辑顶掉
-_fetch_src = _inspect.getsource(module.TmdbProvider.fetch_images)
+_tmdb_src = _inspect.getsource(module.TmdbProvider._fetch_tmdb_images)
 check("单集缩略图仍取 TMDB 的 stills（该集剧照）",
-      'stills' in _fetch_src and 'episodedetails' in _fetch_src,
-      "fetch_images 里应有 episode_thumb_key = 'stills'")
+      'stills' in _tmdb_src and 'episodedetails' in _tmdb_src,
+      "_fetch_tmdb_images 里应有 episode_thumb_key = 'stills'")
 
 # 剧集：MP 的 tv 允许集合里**没有 disc**，所以 image_targets 不该产出 disc.png
 tvshow_nfo = module.load_nfo(FIX / "电视剧" / "怪奇物语 (2016)" / "tvshow.nfo")
