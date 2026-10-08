@@ -191,7 +191,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.8.0"
+PLUGIN_VERSION = "1.8.1"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -2930,8 +2930,27 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                     ]}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VCronField", "props": {
-                                    "model": "cron", "label": "执行周期（留空 = 每周日凌晨 3 点跑一次）",
-                                    "placeholder": "留空 = 每周一次；也可填 5 位 cron，如 0 3 * * * 表示每天 03:00"}}]},
+                                    "model": "cron", "label": "执行周期",
+                                    "placeholder": "留空 = 每周日凌晨 3 点跑一次；也可填 5 位 cron，如 0 3 * * *"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {
+                                    "model": "tmdb_api_key",
+                                    "label": "TMDB API Key（留空 = 沿用 MoviePilot 里配置的 Key）",
+                                    "placeholder": "通常留空即可"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "language", "label": "元数据语言（同时决定优先取哪种语言的图片）",
+                                    "items": [
+                                        {"title": "简体中文", "value": "zh-CN"},
+                                        {"title": "繁體中文", "value": "zh-TW"},
+                                        {"title": "English", "value": "en-US"},
+                                        {"title": "日本語", "value": "ja-JP"},
+                                    ]}}]},
                         ],
                     },
                     {
@@ -2954,10 +2973,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「并发数」决定同时处理多少个 NFO：主要收益在网络等待（图片下载、"
-                                         "TMDB 与 fanart.tv 查询），对本地磁盘与 CPU 压力很小，"
-                                         "所以开着基本只有好处。并发时 TMDB 的请求速率会按比例放宽"
-                                         "（上限约 12 请求/秒，仍远低于其限制），单线程则维持原来的 4 请求/秒。"}]},
+                                 "text": "开销集中在网络等待（下载图片、查 TMDB / fanart.tv），"
+                                         "磁盘与 CPU 压力很小 —— 开大基本只有好处。"}]},
                         ],
                     },
                     {
@@ -3026,10 +3043,8 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
                                  "text": "同一类图两个源都有时，按这里的顺序取第一个命中的。"
-                                         "注意数据源本身的差别：TMDB 只提供海报 / 背景图 / 徽标"
-                                         "（单集另有剧照），而横幅图、光盘图、透明艺术图、横版缩略图"
-                                         "（thumb / landscape）**只有 fanart.tv 有** —— 这几类无论"
-                                         "顺序如何都只能取到 fanart 的。"}]},
+                                         "注意源本身有差别：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图"
+                                         "**只有 fanart.tv 有** —— 这几类无论顺序如何都只能取 fanart 的。"}]},
                         ],
                     },
                     {
@@ -3037,14 +3052,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "**所有类型的图片**（海报 / 背景图 / 徽标 / 横版缩略图 / 剧照 / 季海报）"
-                                         "统一使用同一套选图规则："
-                                         "先取上面「元数据语言」对应的本语言图，"
-                                         "**在本语言里按投票数（vote_count）从高到低取**；"
-                                         "本语言一张都没有时，不再限定语言，"
-                                         "**从全部候选里按投票数从高到低取**。"
-                                         "票数相同时按 TMDB 返回顺序（官方推荐度）取更靠前的那张。"
-                                         "只有在某类型在线**一张图都没有**时才记为缺失，不写这一张。"}]},
+                                 "text": "所有类型的图片共用一套选图规则：先按「元数据语言」取本语言图，"
+                                         "**按投票数从高到低**；本语言一张都没有时不再限定语言，"
+                                         "**从全部候选里按投票数从高到低取**。票数相同按 TMDB 推荐度。"}]},
                         ],
                     },
                     {
@@ -3082,15 +3092,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "两个下拉各管一个数据源，最终处理的是它们的**并集**。"
-                                         "这样的好处是「哪些类型来自 TMDB、哪些来自 fanart.tv」一眼可见 —— "
-                                         "TMDB 只有 海报 / 背景图 / 徽标 / 单集剧照；"
-                                         "fanart.tv 才有 横幅图 / 光盘图 / 透明艺术图 / 横版缩略图。"
-                                         "注意「缩略图（thumb）」两边都有："
-                                         "电影 / 剧集 / 季目录的 thumb 取自 fanart 的横版图，"
-                                         "单集的 thumb 取自 TMDB 该集剧照 —— 所以两个下拉里都能勾到它，"
-                                         "勾任意一边即可生效（同名文件只写一次）。"
-                                         "两个下拉都清空 = 不处理任何图片（不会偷偷回退成全选）。"}]},
+                                 "text": "两个下拉各管一个数据源，实际处理的是它们的**并集**。"
+                                         "「缩略图」两边都有：电影 / 剧集 / 季取自 fanart 横版图，"
+                                         "单集取自 TMDB 剧照 —— 勾任意一边即可生效。"}]},
                         ],
                     },
                     {
@@ -3098,94 +3102,32 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "勾选的类型会写成什么（命名与 MP / Kodi / Jellyfin 约定一致）："
-                                         "① 海报 → poster.jpg；"
-                                         "② 背景图 → backdrop.jpg，并额外写一份 fanart.jpg（Kodi/Emby 认这个名）；"
-                                         "③ 徽标 → logo.png；"
-                                         "④ 缩略图 → thumb.jpg，并额外写一份 landscape.jpg（同一张图的别名）；"
-                                         "电影/剧集/季目录的缩略图取自 fanart.tv 的横版图，"
-                                         "单集则用该集剧照写成与视频同名的 .jpg（要求该集存在 NFO）；"
-                                         "⑤ 横幅图 → banner.jpg；⑥ 光盘图 → disc.png（仅电影）；"
-                                         "⑦ 透明艺术图 → clearart.png。"
-                                         "季图片与 MP 官方保持一致，**两处都写**："
-                                         "该季目录内写通用名（poster.jpg / banner.jpg / thumb.jpg），"
-                                         "剧集根目录同时写一份 seasonNN-poster.jpg（季 0 特别篇写 "
-                                         "season-specials-poster.jpg）—— 兼容只认根目录命名的服务器；"
-                                         "根目录副本不带别名。"
-                                         "某一季在线没有海报时会明确标注缺失，绝不用其它季或剧集海报顶替。"
-                                         "全部不选 = 不处理任何图片（等于关掉图片处理，不会偷偷回退成全选）。"
-                                         "判定沿用与 NFO 相同的「一致才跳过」逻辑：先比对本地图与在线图，"
-                                         "一致不动、不一致才替换 —— 官方「媒体库刮削」只判断文件在不在，"
-                                         "所以低清图、错图永远不会被换掉。首次运行需要下载比对以建立指纹，"
-                                         "之后靠指纹零下载判定。"}]},
+                                 "text": "勾选后会写成：海报 → poster.jpg；背景图 → backdrop.jpg + fanart.jpg；"
+                                         "徽标 → logo.png；缩略图 → thumb.jpg + landscape.jpg（单集则用剧照"
+                                         "写成与视频同名的 .jpg）；横幅图 → banner.jpg；"
+                                         "光盘图 → disc.png（仅电影）；透明艺术图 → clearart.png。"
+                                         "季图片与 MP 官方一致，季目录内写通用名，"
+                                         "剧集根目录同时写一份 seasonNN-poster.jpg。"
+                                         "两个下拉都不选 = 不处理任何图片。"}]},
                         ],
                     },
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "数据来源分两路：海报 / 背景图 / 徽标 / 剧照来自 TMDB；"
-                                         "光盘图 / 横幅图 / 透明艺术图 / 横版缩略图 **只有 fanart.tv 有**，"
-                                         "其 API Key 会自动沿用 MoviePilot 里配置的 FANART_API_KEY"
-                                         "（MP 自带默认值，所以一般什么都不用填），"
-                                         "语言偏好也跟随 MP 的 FANART_LANG。"
-                                         "这几类需要 TMDB API Key 走直连（宿主刮削通道拿不到）。"
-                                         "注意 fanart.tv 是社区共建，冷门影片这几类可能就是没有 —— 那不是故障。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 7}, "content": [
                                 {"component": "VTextarea", "props": {
                                     "model": "paths",
-                                    "label": "媒体库目录（每行一个；行尾可加 #电影 / #电视剧 限定类型）",
+                                    "label": "媒体库目录（每行一个，行尾可加 #电影 / #电视剧）",
                                     "rows": 5,
                                     "placeholder": "/media/link/电影#电影\n"
                                                    "/media/link/电视剧#电视剧\n"
-                                                   "/media/link/其它    （不加 # 则电影和电视剧都处理）"}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「媒体库目录」的行尾可以加 #电影 或 #电视剧 来限定这个目录只处理对应类型，"
-                                         "例如 /media/link/电影#电影 就只会处理电影，"
-                                         "该目录下即使有剧集 NFO 也会被跳过（写入 #电视剧 同理，"
-                                         "会处理剧集及其季、单集）。不加后缀则该目录下两种类型都处理。"
-                                         "别名也认：movie / movies / 影片、tv / tvshow / series / 剧集。"
-                                         "跳过数量会在运行报告的「按目录的『#类型』限定跳过」里体现。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                                   "/media/link/其它    （不加 # 则两种类型都处理）"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 5}, "content": [
                                 {"component": "VTextarea", "props": {
-                                    "model": "exclude_paths", "label": "排除路径", "rows": 2,
-                                    "placeholder": "每行一个路径片段，命中即跳过"}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "tmdb_api_key",
-                                    "label": "TMDB API Key（留空 = 自动使用 MoviePilot 里配置的 Key）",
-                                    "placeholder": "通常留空即可；只有在想用另一个 Key 时才填"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "language", "label": "元数据语言",
-                                    "items": [
-                                        {"title": "简体中文", "value": "zh-CN"},
-                                        {"title": "繁體中文", "value": "zh-TW"},
-                                        {"title": "English", "value": "en-US"},
-                                        {"title": "日本語", "value": "ja-JP"},
-                                    ]}}]},
+                                    "model": "exclude_paths",
+                                    "label": "排除路径（每行一个路径片段，命中即跳过）",
+                                    "rows": 5,
+                                    "placeholder": "Extras\nSample\n@eaDir"}}]},
                         ],
                     },
                     {
@@ -3193,10 +3135,26 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "content": [
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「TMDB API Key」留空时会自动读取 MoviePilot 里已配置的 Key，"
-                                         "网络代理也会自动沿用 MoviePilot 的 PROXY_HOST —— "
-                                         "所以这里通常什么都不用填。只有当 MoviePilot 里也没有可用的 Key 时，"
-                                         "才会退回宿主的刮削通道（该通道拿不到徽标、剧集缩略图和季海报）。"}]},
+                                 "text": "「媒体库目录」行尾加 #电影 或 #电视剧，可限定该目录只处理对应类型；"
+                                         "不加则两种都处理。别名也认：movie / tv / series。"}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "「排除路径」按路径片段做包含匹配，命中即跳过该目录（如 Extras、"
+                                         "@eaDir、Sample）—— 用来避开剧照集、字幕样板等无关目录。"}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "「TMDB API Key」留空时会沿用 MoviePilot 里已配置的 Key 与代理，"
+                                         "所以通常什么都不用填。"}]},
                         ],
                     },
                     {
