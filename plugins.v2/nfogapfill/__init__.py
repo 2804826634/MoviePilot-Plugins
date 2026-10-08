@@ -83,12 +83,12 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
     因此稳态下零下载即可判定「相同」。首次运行需要下载比对以建立指纹（有流量开销）。
     characterart（人物图）仍不支持 —— fanart.tv 有但 MP 的画集清单里没有它，需要时再说。
 
-    ★ v1.8.0 选图规则（**所有类型统一**，海报 / 背景图 / 徽标 / 剧照 / 季图都一样）：
-        第 1 档：先取「元数据语言」对应的本语言图，档内按 vote_count（投票数）降序；
-        第 2 档：本语言一张都没有 → 不限语言，全部候选一起按 vote_count 降序取；
-        同票时按 TMDB 返回顺序（官方推荐度，越靠前越「钦定」）。
+    ★ v1.8.2 选图规则（**所有类型统一**，海报 / 背景图 / 徽标 / 剧照 / 季图都一样）：
+        第 1 档：先取「元数据语言」对应的本语言图，档内按 vote_average（评分）降序；
+        第 2 档：本语言一张都没有 → 不限语言，全部候选一起按评分降序取；
+        排序键：评分降序 → 票数降序 → TMDB 返回顺序。
       只有某类型在线一张图都没有时才记为缺失、不写该文件。
-      （旧版海报有单独的回退链，其它类型按分辨率/评分排序 —— 口径不一致，已统一。）
+      （v1.8.0 曾以票数为唯一依据，实测会选中「票多但差评多」的图，v1.8.2 改为评分优先。）
 
 ────────────────────────────────────────────────────────────────────────
 五、与 MoviePilot 的配置联动（全部自动继承，不用手填）
@@ -191,7 +191,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.8.1"
+PLUGIN_VERSION = "1.8.2"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -1278,20 +1278,29 @@ def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root
 def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
     """从 TMDB 的图片数组里挑一张。**所有图片类型统一走这一套规则。**
 
-    两档，每档内部都按 **vote_count 降序**，同票按 TMDB 返回顺序
-    （即官方推荐度，越靠前越「钦定」）：
+    两档，每档内部都按 **vote_average（评分）降序**：
 
         1. **本语言**（`language`，即设置页的「元数据语言」，如 zh-CN）；
-        2. 本语言一张都没有 → **不限语言**，全部候选一起按票数降序取。
+        2. 本语言一张都没有 → **不限语言**，全部候选一起按评分降序取。
 
-    ★ 为什么第2 档不限制语言：既然本语言根本没有图，继续空着只会让这一类型缺失；
-      而 TMDB 自己的 `vote_count` 就是社区投票，票最高的图客观上是观众最认可的版本。
-      与其留白，不如用票数在全部候选里做二次择优。
+    排序键依次是：**评分降序 → 票数降序 → TMDB 返回顺序**。
 
-    票数相同时用 TMDB 返回顺序兜底，而不是分辨率 / 评分：
-    早先版本比过「分辨率越大越好 → 评分 → 投票数」，会挑出与 MP 官方不同的图
-    （MP 对根目录 poster/backdrop/logo 直接取 TMDB 主记录的钦定图），表现为「两边图不一样」。
-    现按用户要求以**票数**为唯一排序依据，同票才轮到返回顺序。
+    ★ 为什么以「评分」为准而不是「票数」：票数只能说明「有多少人投过票」，
+      不代表图好 —— 一张图可能因为曝光多而被大量投低分。实测《凡人修仙传》
+      (tv 106449) 的 142 张中文海报里，票数最高那张（18 票）平均分只有 3.14，
+      而评分最高那张（7.54）只有 8 票；按票数排序会把口碑最差的那张选中。
+      改为评分优先后，该片选中的正是 7.54 那张。
+
+    ★ 票数降序只作**并列时的兜底**：两张图评分一样时，投过票的那张
+      样本更多、更可信，所以排在前面；再并列才用 TMDB 返回顺序。
+
+    ★ 为什么第 2 档不限制语言：既然本语言根本没有图，继续空着只会让这一类型缺失；
+      与其留白，不如在全部候选里按同一套评分规则做二次择优。
+
+    ★ 低票数噪声已实测排除：TMDB 上只被投过 1 票的图，评分上限很低
+      （实测三部热门片里，1 票图的最高评分都只有 3.334），
+      且给全局最高分图加上「≥2 / ≥3 / ≥5 票」门槛后**结果完全相同**，
+      所以不需要额外设最低票数门槛。
 
     候选全为空（`entries` 为空、或所有项都没有 `file_path`）→ 返回 None，
     由上层记为该类型缺失、不写文件。
@@ -1307,17 +1316,30 @@ def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
     # 第 1 档限本语言；本语言一张都没有时，第 2 档放开到全部候选
     pool = same_lang or candidates
 
+    def average(item: dict) -> float:
+        """评分：TMDB 给的是 float 形态（`vote_average: 7.542`），统一成数值比较。"""
+        try:
+            return float(item.get("vote_average") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def votes(item: dict) -> float:
-        """票数：TMDB 给的是 float 形态（`vote_count: 7.0`），统一成数值比较。"""
+        """票数：同样可能是 float 形态（`vote_count: 7.0`），只在评分并列时用。"""
         try:
             return float(item.get("vote_count") or 0)
         except (TypeError, ValueError):
             return 0.0
 
-    # 稳定排序：票数降序，同票保持 TMDB 原始顺序（越靠前越钦定）
+    # 评分降序 → 票数降序 → TMDB 原始顺序（遍历时只在「严格更优」才替换，
+    # 所以并列项保留最先出现的那张，即返回顺序靠前的）
+    # 评分按 3 位小数比较：TMDB 的 vote_average 就是 3 位精度，
+    # 这样 8.034 与 8.034000001 会被当作并列、交给票数决定，而不是被浮点噪声左右。
+    def rank(item: dict) -> Tuple[float, float]:
+        return (round(average(item), 3), votes(item))
+
     best = pool[0]
     for item in pool:
-        if votes(item) > votes(best):
+        if rank(item) > rank(best):
             best = item
     return best
 
@@ -1650,7 +1672,7 @@ class TmdbProvider:
             return
         # `include_image_language` 决定 TMDB **在服务端**返回哪些语言的图 ——
         # 没写进去的语言，再怎么选图也拿不到。
-        # v1.8.0 起选图规则是「本语言 → 不限语言按票数降序」，第 2 档要看到全部语言，
+        # v1.8.0 起选图规则是「本语言 → 不限语言按评分降序」，第 2 档要看到全部语言，
         # 所以这里**显式枚举一批常见语言**而不是只报本语言 + null。
         # ⚠️ 实测坑：TMDB 的 `include_image_language` **省略或传空串都拿不到全部语言**
         #   （Friends tmdb_id=2420 的 poster 在这两种写法下都只返回 0 张），
@@ -1674,7 +1696,7 @@ class TmdbProvider:
                 # 不是横版缩略图），留给 fanart 的 tvthumb / moviethumb
                 continue
             entries = data.get(api_key) or []
-            # v1.8.0：只要有候选就一定能选出一张（本语言优先，否则全候选按票数降序），
+            # v1.8.0：只要有候选就一定能选出一张（本语言优先，否则全候选按评分降序），
             # 所以「没选到」只剩一种原因 —— 该类型在线一张图都没有。
             # 请求层已显式枚举常见语言，无需再补探测请求。
             best = pick_best_image(entries, self.language)
@@ -3053,8 +3075,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                             {"component": "VCol", "props": {"cols": 12}, "content": [
                                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
                                  "text": "所有类型的图片共用一套选图规则：先按「元数据语言」取本语言图，"
-                                         "**按投票数从高到低**；本语言一张都没有时不再限定语言，"
-                                         "**从全部候选里按投票数从高到低取**。票数相同按 TMDB 推荐度。"}]},
+                                         "**按评分（vote_average）从高到低**；本语言一张都没有时"
+                                         "不再限定语言，**从全部候选里按评分从高到低取**。"
+                                         "评分相同时票数多的优先，再相同则按 TMDB 推荐度。"}]},
                         ],
                     },
                     {
@@ -3442,7 +3465,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "，代理沿用宿主的" if proxy else ""))
             logger.info("图片来源优先级：" + " → ".join(
                 IMAGE_SOURCE_CN.get(s, s) for s in self._image_sources))
-            logger.info("选图规则：优先本语言（%s），本语言没有则按投票数从全部候选里取"
+            logger.info("选图规则：优先本语言（%s），本语言没有则按评分从全部候选里取"
                         % (self._language or "?"))
             return TmdbProvider(key, self._language, proxy or None,
                                 CERT_COUNTRY, limit, quality,
@@ -3570,7 +3593,7 @@ def build_cli_provider(args) -> Any:
     order = image_source_order(args.image_sources)
 
     logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
-    logger.info("选图规则：优先本语言（%s），本语言没有则按投票数从全部候选里取"
+    logger.info("选图规则：优先本语言（%s），本语言没有则按评分从全部候选里取"
                 % (args.lang or "?"))
     return TmdbProvider(args.api_key, args.lang, args.proxy or None, CERT_COUNTRY,
                         args.cast_limit, args.image_quality,
