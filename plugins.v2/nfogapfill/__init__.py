@@ -21,7 +21,7 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
 
     docker-compose.yml 里把本仓库追加到插件市场（不要覆盖官方市场）：
         environment:
-          - PLUGIN_MARKET=jxxghp/MoviePilot-Plugins,2804826634/moviepilot-nfo-gapfill
+          - PLUGIN_MARKET=jxxghp/MoviePilot-Plugins,2804826634/MoviePilot-Plugins
     重启容器后，插件市场搜「NFO」即可安装。
 
   也可以单文件手动放入（升级镜像会丢，需重做）：

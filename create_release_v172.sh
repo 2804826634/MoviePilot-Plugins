@@ -3,7 +3,7 @@
 # 用法：GH_TOKEN=你的PAT bash create_release_v172.sh
 set -euo pipefail
 : "${GH_TOKEN:?请先设置 GH_TOKEN 环境变量}"
-OWNER=2804826634; REPO=moviepilot-nfo-gapfill
+OWNER=2804826634; REPO=MoviePilot-Plugins
 T="$(mktemp -d)"
 cd "$(dirname "$0")"
 

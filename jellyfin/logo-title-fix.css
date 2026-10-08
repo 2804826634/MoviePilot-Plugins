@@ -9,7 +9,7 @@
    用法：Jellyfin 仪表盘 → 控制台 → 常规 →「自定义 CSS 代码」，
         在你现有皮肤的 @import 之后，追加这一行即可：
 
-     @import url("https://cdn.jsdelivr.net/gh/2804826634/moviepilot-nfo-gapfill@main/jellyfin/logo-title-fix.css");
+     @import url("https://cdn.jsdelivr.net/gh/2804826634/MoviePilot-Plugins@main/jellyfin/logo-title-fix.css");
 
    注意：
      1) @import 必须放在所有普通 CSS 规则「之前」（即盒子最顶部）。
