@@ -116,6 +116,7 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
 import sys
@@ -180,7 +181,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.7.1"
+PLUGIN_VERSION = "1.7.2"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -956,7 +957,17 @@ class ImageManifest:
 
 
 def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root_dir: Path) -> None:
-    """原子写入图片：先写 .nfgpart 再 replace，避免媒体服务器读到半截文件。"""
+    """原子写入图片：先写临时文件再 replace，避免媒体服务器读到半截文件。
+
+    临时文件名**必须唯一**（带 pid + 线程 id）：
+        · 同一部片子的多个别名目标（如 backdrop.jpg 与 fanart.jpg）虽路径不同，
+          但并发扫描时若**同一路径**被两个 worker 命中（库用了硬链接/软链接，
+          或同一 NFO 出现在多个 root 下），固定名 `xxx.nfgpart` 会被互相踩——
+          一个线程 replace 后临时文件就没了，另一个再 replace 直接
+          `[Errno 2] No such file or directory: 'xxx.nfgpart' -> 'xxx'`。
+        这就是线上真实报错的成因。
+        · 写入失败（被媒体服务器扫描锁住等）重试一次，仍失败才抛出。
+    """
     if backup_root:
         try:
             dst = backup_root / path.relative_to(root_dir)
@@ -966,9 +977,26 @@ def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root
         except Exception as exc:
             logger.warning(f"备份图片失败（继续写入）：{path}（{exc}）")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".nfgpart")
-    tmp.write_bytes(data)
-    tmp.replace(path)
+    # 唯一临时名：进程 + 线程 + 随机数。留 .nfgpart 后缀便于识别残留。
+    unique = f"{os.getpid()}.{threading.get_ident()}.{os.urandom(4).hex()}"
+    tmp = path.with_name(f"{path.name}.{unique}.nfgpart")
+    last_exc: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            tmp.write_bytes(data)
+            tmp.replace(path)
+            return
+        except Exception as exc:                        # 多为独占锁 / 临时文件被清
+            last_exc = exc
+            try:
+                tmp.unlink(missing_ok=True)             # 清掉残留再试，避免留下垃圾
+            except Exception:
+                pass
+            if attempt == 1:
+                logger.warning(f"图片写入失败，重试一次：{path}（{exc}）")
+                time.sleep(0.3)
+    if last_exc is not None:
+        raise last_exc
 
 
 def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
@@ -1945,6 +1973,7 @@ class Engine:
     def run(self) -> Report:
         self.report.started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         targets: List[Path] = []
+        seen_paths: set = set()          # 同一 NFO 只处理一次（见下）
         for root in self.cfg.roots:
             if not root.is_dir():
                 logger.warning(f"目录不存在，已跳过：{root}")
@@ -1952,6 +1981,17 @@ class Engine:
             for path in iter_nfo_files(root):
                 if is_excluded(path, self.cfg.exclude_paths):
                     continue
+                # 多个 root 嵌套 / 库用了硬链接·软链接时，同一个 NFO 可能被扫到两次。
+                # 那样并发下同一目录的两张图会被两个 worker 同时写，正是线上
+                # "No such file or directory: 'xxx.nfgpart' -> 'xxx'" 的根因之一，
+                # 而且会让报告里的计数翻倍。这里按 realpath 去重。
+                try:
+                    key = os.path.realpath(path)
+                except Exception:
+                    key = str(path)
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
                 targets.append(path)
         if self.single_file:
             targets = [self.single_file] if self.single_file in targets or self.single_file.exists() else targets

@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.7.1-blue)
+![version](https://img.shields.io/badge/version-1.7.2-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -367,7 +367,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 无需联网、无需 TMDB Key，纯标准库：
 
 ```bash
-python tests/_self_test.py          # 引擎行为 62 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季海报落位）
+python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季海报落位）
 python tests/_self_test_plugin.py   # 插件面 181 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试/季海报落盘规则）
 ```
 
