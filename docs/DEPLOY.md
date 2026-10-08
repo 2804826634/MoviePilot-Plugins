@@ -100,6 +100,7 @@ docker restart moviepilot-v2
 | --- | --- |
 | 市场里看不到插件 | `PLUGIN_MARKET` 没生效（改完要重启容器）；仓库不是 public；容器访问不了 raw.githubusercontent.com，配 `PROXY_HOST` 或 `GITHUB_TOKEN` |
 | **插件图标显示成默认的拼图块** | MP 是把 `package.v2.json` 里的 `icon` 字段**原样交给浏览器**加载的（服务端不代理图标），所以 raw.githubusercontent.com 在国内被挡时，市场列表能刷出来、图标却加载不出来。v1.7.1 起图标改用 **jsDelivr CDN**（一般可直连）。若仍不显示：① 插件市场点「刷新」让 MP 重新读取；② 浏览器硬刷新（Ctrl+F5）；③ 直接在浏览器打开那个图标链接确认能否访问，打不开说明该 CDN 也被挡，换成自己的图床地址即可 |
+| 目录里几张图内容一模一样（如 `backdrop.jpg` / `fanart.jpg` / `landscape.jpg`） | **属正常，不是写重复**：① `fanart.jpg` 是 `backdrop.jpg` 的**别名**，同一张背景图的两套文件名，兼容不同媒体服务器；② `landscape.jpg`（横版缩略图）取自 fanart.tv，其 `moviethumb`/`tvthumb` **常与背景图是同一张**。不想留这么多份，就在「处理的图片类型」里取消勾选「横版缩略图」 |
 | 图标是破图 | 属于正常降级，不影响功能；确认 `package.v2.json` 里 `icon` 的 URL 可访问 |
 | **日志出现 `[Errno 2] No such file or directory: 'xxx.jpg.nfgpart' -> 'xxx.jpg'`** | v1.7.1 及更早的 bug：原子写入用的**临时文件名固定**（`xxx.nfgpart`），并发扫描时同一路径被两个任务同时写、互相把临时文件踩掉。v1.7.2 起临时名带上 **进程 + 线程 + 随机数** 保证唯一，并对写入失败**自动重试一次**；同时对扫描到的 NFO **按真实路径去重** —— 库里有硬链接/软链接、或同一 NFO 落在多个媒体库目录下时，旧版会把它算两遍（既会撞车、计数也会翻倍）。升级即修好，无需手工处理 |
 | 扫描到 0 个 NFO | `paths` 填的是容器内路径（如 `/media/link/电影`），不是宿主机路径；确认该目录在容器里存在 |

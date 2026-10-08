@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.7.3-blue)
+![version](https://img.shields.io/badge/version-1.7.4-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -384,6 +384,17 @@ python tests/_self_test_plugin.py   # 插件面 181 项断言（伪造 MP 宿主
 - **电影**（`movie.nfo` / 同名 NFO）：`title`、`originaltitle`、`plot`、`tagline`、`year`、`premiered`、`runtime`、`mpaa`、`rating`、`genre`、`studio`、`country`、`director`、`credits`、`actor`，以及 `uniqueid[tmdb]` / `tmdbid`
 - **剧集**：`tvshow.nfo`、`season.nfo`、单集 NFO（`episodedetails`）
 - **图片**：`poster`（海报）、`backdrop`（背景图，含 `fanart` 别名）、`logo`（徽标）、`thumb`（剧集缩略图）、季海报（只在季目录内）
+
+> **为什么目录里会有几张「看起来一样」的图？** 这是正常的，不是写重复了：
+>
+> - `backdrop.jpg` 与 `fanart.jpg` —— **本来就是同一张背景图**，只是 Kodi / Emby / Jellyfin
+>   认的文件名不同（`fanart` 是 `backdrop` 的别名），所以两份内容必然一致；
+> - `landscape.jpg`（横版缩略图）来自 **fanart.tv**，而 fanart.tv 提供的
+>   `moviethumb` / `tvthumb` **常常与背景图就是同一张** —— 这是图源本身的惯例，
+>   不是插件取错图。
+>
+> 如果不需要这么多份，在插件配置的「处理的图片类型」里**取消勾选「横版缩略图」**
+> 即可（`backdrop` 与 `fanart` 建议保留，它们兼容不同媒体服务器）。
 
 ---
 
