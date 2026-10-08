@@ -95,13 +95,17 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
 五、与 MoviePilot 的配置联动（全部自动继承，不用手填）
     TMDB API Key 自动读取 MoviePilot 里配置的 TMDB_API_KEY；
     网络代理     自动读取 MoviePilot 里配置的 PROXY_HOST —— 插件里已不再提供代理输入框。
+    v1.9.1 起插件页也不再提供 API Key 输入框：想换 Key 直接改 MoviePilot「设置 → TMDB」。
     两者都拿不到时才退回宿主刮削通道（该通道只有海报与背景图）。
 
     分级地区码固定为美国（US），决定 NFO 里 <mpaa> 取哪份分级：
         US → PG-13 / R　　（引擎参数 cert_country 仍可自定义，插件配置页已不提供）
         若该片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，不会留空。
 
-    演员写入上限 可选 10 / 20 / 30 / 50 / 全部（全部 = 0，不限制）。
+    v1.9.1 起以下三项在插件页固定、不再提供配置项（引擎层参数仍保留供代码 / CLI 调用）：
+        演员写入上限 = 全部（按 TMDB 返回的全写，cast_limit=0）；
+        图片画质     = 原始尺寸（不再提供「标准画质」档）；
+        背景图选取顺序 = 跟随 TMDB 官网列表顺序（web，不限语言、不重排）。
 
     v1.8.0 起配置页不再提供「保护字段」；想保住手工润色的内容请用「只补缺失」（gapfill）模式。
     引擎层的 EngineConfig.protect_fields 精细语义仍保留，供代码直接调用
@@ -192,7 +196,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.9.0"
+PLUGIN_VERSION = "1.9.1"
 # 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
 #
 # 三条约束（都踩过坑，别改回去）：
@@ -3066,17 +3070,19 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _respect_lock: bool = True
     _dry_run: bool = False
     _backup: bool = True
-    _tmdb_api_key: str = ""
     _language: str = "zh-CN"
-    _cast_limit: str = "20"
     _notify: bool = True
     _image_mode: str = IMG_SYNC
     _image_kinds: Any = IMAGE_KINDS          # 合并后的「要处理哪些类型」（引擎用）
     _tmdb_image_kinds: Any = TMDB_IMAGE_KINDS    # TMDB 下拉（界面展示）
     _fanart_image_kinds: Any = FANART_IMAGE_KINDS  # fanart 下拉（界面展示）
-    _image_quality: str = "standard"
     _image_sources: Any = IMAGE_SOURCES      # 统一由 image_source_order 收敛成有序列表
-    _backdrop_order: str = BACKDROP_WEB      # 背景图选取顺序：web（跟随官网）/ language
+    # v1.9.1 起以下四项不再提供配置界面，固定为：
+    #   API Key = 自动沿用 MoviePilot；演员 = 全部写入；画质 = 原图；背景图 = 跟随官网顺序
+    _tmdb_api_key: str = ""
+    _cast_limit: str = "0"
+    _image_quality: str = "original"
+    _backdrop_order: str = BACKDROP_WEB
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
 
@@ -3095,9 +3101,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._respect_lock = bool(config.get("respect_lock", True))
             self._dry_run = bool(config.get("dry_run"))
             self._backup = bool(config.get("backup", True))
-            self._tmdb_api_key = (config.get("tmdb_api_key") or "").strip()
             self._language = config.get("language") or "zh-CN"
-            self._cast_limit = str(config.get("cast_limit") or "20")
             self._notify = bool(config.get("notify", True))
             self._image_mode = config.get("image_mode") or IMG_SYNC
             # 图片类型：收敛成一个干净的列表；若与存下来的值不同就顺手修正回去，
@@ -3125,11 +3129,10 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 repair["tmdb_image_kinds"] = tmdb_kinds
             if config.get("fanart_image_kinds") != fanart_kinds:
                 repair["fanart_image_kinds"] = fanart_kinds
-            self._image_quality = config.get("image_quality") or "standard"
-            # 图片来源优先级：收敛成有序列表，非法值顺手修正回默认
             self._image_sources = image_source_order(config.get("image_sources"))
-            # 背景图选取顺序：web（跟随 TMDB 官网）/ language（本语言优先），非法值回落 web
-            self._backdrop_order = normalize_backdrop_order(config.get("backdrop_order"))
+            # v1.9.1 起 tmdb_api_key / cast_limit / image_quality / backdrop_order
+            # 不再读取配置（固定值见类字段注释）；老配置里残留的这些键会被直接忽略，
+            # __save_config 也不再回写它们。
 
         self.stop_service()
 
@@ -3190,9 +3193,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                               "留空 = 每周日凌晨 3 点跑一次；也可填 5 位 cron，如 0 3 * * *"),
                 ),
                 form_row(
-                    form_text("tmdb_api_key",
-                              "TMDB API Key（留空 = 沿用 MoviePilot 里配置的 Key）",
-                              "通常留空即可"),
                     form_select("language", "元数据语言（同时决定优先取哪种语言的图片）", {
                         "zh-CN": "简体中文",
                         "zh-TW": "繁體中文",
@@ -3217,23 +3217,16 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 ),
                 form_row(
                     form_switch("backup", "写入前备份原 NFO / 图片到 .nfo-backup"),
-                    form_select("cast_limit", "演员写入上限", {
-                        "10": "10 位（文件更小）",
-                        "20": "20 位（默认）",
-                        "30": "30 位",
-                        "50": "50 位",
-                        "0": "全部（按 TMDB 返回的全写，NFO 会明显变大）",
-                    }),
                 ),
+                form_row(form_alert(
+                    "演员**全部写入**（按 TMDB 返回的全写，不再限制 10/20/30/50 位）；"
+                    "图片始终按**原始尺寸**下载（海报原图 / 背景原图，不再提供「标准画质」档，"
+                    "体积会明显更大，但最清晰）。")),
                 form_row(
                     form_select("image_mode", "图片处理", {
                         "sync": "缺失补齐 + 不一致替换（推荐）",
                         "missing": "只补缺失图片（不比对、不替换已有图）",
                         "off": "完全不处理图片",
-                    }),
-                    form_select("image_quality", "图片画质", {
-                        "standard": "标准（海报 w780 / 背景 w1280，省空间）",
-                        "original": "原始尺寸（最清晰，体积明显更大）",
                     }),
                 ),
                 form_row(
@@ -3248,17 +3241,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "注意源本身有差别：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图"
                         "**只有 fanart.tv 有** —— 这几类无论顺序如何都只能取 fanart 的。"),
                 ),
-                form_row(
-                    form_select("backdrop_order", "背景图选取顺序", {
-                        "web": "跟随 TMDB 官网顺序（不限语言，取列表第一张）— 推荐",
-                        "language": "跟随元数据语言（本语言优先 + 评分）",
-                    }, md=12),
-                    form_alert(
-                        "背景图是语言无关的装饰图：TMDB 官网 images 页列表第一张"
-                        "就是官方排序里最好的那张（常为「无语言」的高分大图）。"
-                        "默认「跟随官网顺序」—— 直接取 TMDB 原始列表第一张，"
-                        "不做语言过滤、也不重排。"),
-                ),
+                form_row(form_alert(
+                    "背景图固定**跟随 TMDB 官网顺序**：直接取官网 images 页列表第一张"
+                    "（常为「无语言」的高分大图），不做语言过滤、也不重排。")),
                 form_row(form_alert(
                     "其余图片（海报 / 徽标 / 剧照）仍按「元数据语言」优先：先取本语言图、"
                     "**按评分（vote_average）从高到低**；本语言一张都没有时"
@@ -3310,8 +3295,10 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     "「排除路径」按路径片段做包含匹配，命中即跳过该目录（如 Extras、"
                     "@eaDir、Sample）—— 用来避开剧照集、字幕样板等无关目录。")),
                 form_row(form_alert(
-                    "「TMDB API Key」留空时会沿用 MoviePilot 里已配置的 Key 与代理，"
-                    "所以通常什么都不用填。")),
+                    "TMDB API Key 与代理均**自动沿用 MoviePilot 的配置**"
+                    "（设置 → TMDB / 网络），插件里不再提供输入框；"
+                    "想换 Key 直接改 MoviePilot 的设置即可。"
+                    "两者都拿不到时会退回宿主刮削通道（只有海报与背景图可用）。")),
                 form_row(form_alert(
                     "NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），"
                     "固定取**美国（US）**地区的分级。"
@@ -3337,15 +3324,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "backup": True,
             "paths": "",
             "exclude_paths": "",
-            "tmdb_api_key": "",
             "language": "zh-CN",
-            "cast_limit": "20",
             "image_mode": IMG_SYNC,
             "tmdb_image_kinds": list(TMDB_IMAGE_KINDS),
             "fanart_image_kinds": list(FANART_IMAGE_KINDS),
-            "image_quality": "standard",
             "image_sources": ",".join(IMAGE_SOURCES),
-            "backdrop_order": BACKDROP_WEB,
             }
 
     def get_page(self) -> List[dict]:
@@ -3517,16 +3500,12 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "backup": self._backup,
                 "paths": self._paths,
                 "exclude_paths": self._exclude_paths,
-                "tmdb_api_key": self._tmdb_api_key,
                 "language": self._language,
-                "cast_limit": self._cast_limit,
                 "image_mode": self._image_mode,
                 "image_kinds": self._image_kinds,
                 "tmdb_image_kinds": self._tmdb_image_kinds,
                 "fanart_image_kinds": self._fanart_image_kinds,
-                "image_quality": self._image_quality,
                 "image_sources": ",".join(self._image_sources),
-                "backdrop_order": self._backdrop_order,
             })
         except Exception as exc:
             logger.warning(f"保存插件配置失败：{exc}")
@@ -3567,21 +3546,20 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
         return base / "image_manifest.json"
 
     def __build_provider(self):
-        limit = self.__int(self._cast_limit, 20)
-        # Key 与代理都自动沿用 MoviePilot 的配置（插件里已不再提供这两项的输入框）
-        own_key = (self._tmdb_api_key or "").strip()
-        key = own_key or str(mp_setting("TMDB_API_KEY", "") or "").strip()
+        # v1.9.1 起固定行为：演员全部写入（0 = 不限）、图片原始尺寸、
+        # 背景图跟随 TMDB 官网顺序；Key 与代理都自动沿用 MoviePilot 的配置
+        # （插件里已不再提供这几项的输入框）
+        key = str(mp_setting("TMDB_API_KEY", "") or "").strip()
         proxy = str(mp_setting("PROXY_HOST", "") or "").strip()
         if key:
-            logger.info("TMDB 数据源：%s%s" % (
-                "插件内单独配置的 API Key" if own_key else "自动读取 MoviePilot 中配置的 API Key",
-                "，代理沿用宿主的" if proxy else ""))
-            return build_tmdb_provider(key, self._language, proxy, limit,
-                                       self._image_quality, self._concurrency,
-                                       self._image_sources, self._backdrop_order)
-        logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
+            logger.info("TMDB 数据源：自动读取 MoviePilot 中配置的 API Key%s"
+                        % ("，代理沿用宿主的" if proxy else ""))
+            return build_tmdb_provider(key, self._language, proxy, 0,
+                                       "original", self._concurrency,
+                                       self._image_sources, BACKDROP_WEB)
+        logger.warning("MoviePilot 里没有可用的 TMDB API Key，改用宿主刮削通道"
                        "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
-        return HostProvider(normalize_quality(self._image_quality), limit)
+        return HostProvider("original", 0)
 
     @staticmethod
     def __int(value: Any, default: int) -> int:
@@ -3620,7 +3598,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 concurrency=self._concurrency,
                 image_mode=normalize_image_mode(self._image_mode),
                 image_kinds=self.__image_kinds_set(),
-                image_quality=normalize_quality(self._image_quality),
+                image_quality="original",  # v1.9.1 起固定原图（引擎仍支持 standard，CLI 可选）
                 manifest_path=self.__manifest_file(),
             )
             provider = self.__build_provider()
@@ -3713,7 +3691,8 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--api-key", default=None, help="TMDB API Key（默认读环境变量 TMDB_API_KEY）")
     parser.add_argument("--lang", default="zh-CN", help="元数据语言，默认 zh-CN")
     parser.add_argument("--proxy", default=None, help="代理，如 http://127.0.0.1:7890")
-    parser.add_argument("--cast-limit", type=int, default=20, help="演员写入上限，默认 20；0 = 全部写入")
+    parser.add_argument("--cast-limit", type=int, default=0,
+                        help="演员写入上限，默认 0 = 全部写入（与插件一致）")
     parser.add_argument("--concurrency", type=int, default=1,
                         help="并发处理数（1 = 顺序；插件默认 4）")
     parser.add_argument("--max-files", type=int, default=0, help="单轮最多处理多少个 NFO")
@@ -3728,8 +3707,8 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--backdrop-order", choices=list(BACKDROP_ORDERS), default=BACKDROP_WEB,
                         help="背景图选取顺序：web = 直接取 TMDB 官网列表第一张（默认，"
                              "不限语言、不重排）；language = 本语言优先 + 评分")
-    parser.add_argument("--image-quality", choices=["standard", "original"], default="standard",
-                        help="图片画质，默认 standard（海报 w780 / 背景图 w1280 / 徽标 w500）")
+    parser.add_argument("--image-quality", choices=["standard", "original"], default="original",
+                        help="图片画质，默认 original 原图（与插件一致）；standard = 海报 w780 / 背景图 w1280 / 徽标 w500")
     parser.add_argument("--image-sources", default="tmdb,fanart",
                         help="图片来源优先级，逗号分隔，默认 tmdb,fanart（TMDB 优先，fanart 兜底）")
     parser.add_argument("--image-manifest", default="",

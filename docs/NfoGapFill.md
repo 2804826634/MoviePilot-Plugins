@@ -168,9 +168,9 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 > | `web`（默认） | `j9fRIimor0…jpg` | 无语言 · 3840×2160 · 8.034 分 ← **官网列表第 1 张** |
 > | `language` | `l8lwpvr1QA…jpg` | 中文 · 1920×1080 · 评分/票数全 0 |
 >
-> 可在设置项 **「背景图选取顺序」**（`backdrop_order`）里切回旧行为（`language`）。
+> v1.9.1 起**固定为「跟随官网顺序」**（配置页不再提供切换项）。
 > **只影响背景图** —— 海报 / 徽标 / 剧照仍按语言优先，实测两种模式下
-> 海报与徽标选出的图**完全一致**。
+> 海报与徽标选出的图**完全一致**。特殊场景仍可用 CLI `--backdrop-order language` 切回旧行为。
 >
 > ⚠️ **与 MP 的一处可解释差异**（不是故障）：MP 对根目录的 `poster` / `backdrop` / `logo`
 > 直接取 TMDB **主记录里那一张**（`MediaInfo.poster_path` / `backdrop_path` / `logo_path`，
@@ -351,17 +351,25 @@ docker restart moviepilot-v2
 | `dry_run` | 关 | 演练模式，不写盘 |
 | `respect_lock` | 开 | 尊重 NFO 内 `lockdata` / `lockedfields`（NFO 字段与图片都受它保护） |
 | `backup` | 开 | 写入前备份 NFO 与图片到 `.nfo-backup/` |
-| `cast_limit` | `20` | 演员写入上限，可选 `10` / `20` / `30` / `50` / **全部**（`0` = 不限制） |
 | `paths` | 空 | 媒体库目录，每行一个；**行尾可加 `#电影` / `#电视剧` 限定该目录的类型**（见下） |
 | `exclude_paths` | 空 | 排除路径片段，命中即跳过 |
-| `tmdb_api_key` | 空 | TMDB API Key。**留空 = 自动读取 MoviePilot 里配置的 `TMDB_API_KEY`** |
-| `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`）。**同时是海报 / 徽标 / 剧照的第一优先语言**（见上；背景图默认不按语言过滤） |
+| `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`）。**同时是海报 / 徽标 / 剧照的第一优先语言**（见上；背景图不按语言过滤） |
 | `image_mode` | `sync` | 图片处理：`sync` / `missing` / `off`，见上节 |
 | `tmdb_image_kinds` | 四项全选 | **TMDB 提供的图片类型**（多选下拉）：海报 / 背景图 / 徽标 / 剧集缩略图（单集剧照） |
 | `fanart_image_kinds` | 五项全选 | **fanart.tv 提供的图片类型**（多选下拉）：横版缩略图 / 横幅图 / 光盘图 / 透明艺术图 / 别名 landscape |
-| `image_quality` | `standard` | 画质档：`standard`（海报 w780 / 背景图 w1280 / 徽标 w500）或 `original`（最清晰、体积大） |
 | `image_sources` | `tmdb,fanart` | **图片来源优先级**：`tmdb,fanart`（TMDB 优先）/ `fanart,tmdb` / `tmdb`（只用 TMDB）/ `fanart`（只用 fanart） |
-| `backdrop_order` | `web` | **背景图选取顺序**：`web`（跟随 TMDB 官网列表第一张，不限语言、不重排）/ `language`（本语言优先 + 评分）。**只影响背景图** |
+
+> **v1.9.1 起以下四项不再出现在配置页**（行为固定，无需配置）：
+>
+> | 原配置项 | v1.9.1 起的固定行为 |
+> |---|---|
+> | `tmdb_api_key` | **自动读取 MoviePilot「设置 → TMDB」里配置的 `TMDB_API_KEY`**，插件页不再提供输入框；想换 Key 直接改 MoviePilot 的设置 |
+> | `cast_limit` | **全部写入**：按 TMDB 返回的演员全写，不再限制 10/20/30/50 位（NFO 会明显变大） |
+> | `image_quality` | **始终原始尺寸**：海报 / 背景图 / 徽标都取原图（不再提供「标准画质」w780/w1280 档） |
+> | `backdrop_order` | **始终跟随 TMDB 官网顺序**（`web`）：取官网 images 页列表第一张，不限语言、不重排 |
+>
+> 引擎层对应的参数（`cast_limit` / `image_quality` / `backdrop_order` / 自定义 Key）仍然保留，
+> CLI 也可用 `--cast-limit` / `--image-quality` / `--backdrop-order` 临时调整，供特殊场景调用。
 
 > **图片类型拆成两个下拉（v1.7.7 起）**：一个列 **TMDB 能给的**（海报 / 背景图 / 徽标 / 单集剧照），
 > 一个列 **fanart.tv 才有的**（横幅图 / 光盘图 / 透明艺术图 / 横版缩略图）。
