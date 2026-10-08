@@ -2,6 +2,7 @@
 
 > 收录两个自用插件：**NFO 与图片差异比对**、**整理记录季集修正**。
 
+![version](https://img.shields.io/badge/version-1.7.8-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -18,7 +19,7 @@
 
 | 插件 ID | 名称 | 说明 | 版本 |
 | --- | --- | --- | --- |
-| [`NfoGapFill`](docs/NfoGapFill.md) | NFO 与图片差异比对 | 本地 NFO / 海报 / 背景图与在线元数据的**内容比对**：缺失补齐、不一致替换、一致跳过 | 1.7.7 |
+| [`NfoGapFill`](docs/NfoGapFill.md) | NFO 与图片差异比对 | 本地 NFO / 海报 / 背景图与在线元数据的**内容比对**：缺失补齐、不一致替换、一致跳过 | 1.7.8 |
 | [`SpecialsFixer`](docs/SpecialsFixer.md) | 整理记录季集修正 | 对 TMDB 查无该集的整理记录识别特别篇，修正季/集为 Season 00 并重新触发 MP 整理 | 1.0.0 |
 
 两者互不依赖，可单独安装。点击插件名看详细文档。
@@ -44,6 +45,7 @@
 
 ### 版本历史
 
+- [RELEASE v1.7.8](RELEASE_v1.7.8.md) —— 海报语言回退改为「本语言 → 无文字海报」，**绝不用外文海报凑数**
 - [RELEASE v1.7.7](RELEASE_v1.7.7.md)
 - [RELEASE v1.7.6](RELEASE_v1.7.6.md)
 
@@ -73,7 +75,7 @@ MoviePilot-Plugins/
 │   ├── _self_test.py / _self_test_plugin.py / _fixture/
 │   └── specials/test_specialsfixer.py       # 78 项
 ├── jellyfin/logo-title-fix.css      # Jellyfin 详情页 logo/文字二选一
-└── RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
+└── RELEASE_v1.7.8.md / RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
 ```
 
 约定：

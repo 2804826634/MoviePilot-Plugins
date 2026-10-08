@@ -125,7 +125,7 @@ expected_keys = {"enabled", "onlyonce", "notify", "mode", "cron", "dry_run", "re
                  "backup", "paths", "exclude_paths", "protect_fields",
                  "tmdb_api_key", "language", "cert_country", "cast_limit",
                  "image_mode", "tmdb_image_kinds", "fanart_image_kinds",
-                 "image_quality", "image_sources"}
+                 "image_quality", "image_sources", "poster_fallbacks"}
 check("默认配置包含全部配置项", expected_keys <= set(defaults),
       f"缺少 {expected_keys - set(defaults)}")
 form_json = str(form[0])
@@ -175,6 +175,15 @@ check("图片来源优先级默认 TMDB 优先、fanart.tv 其次",
 check("图片来源优先级下拉列了四种组合",
       all(v in form_json for v in ("tmdb,fanart", "fanart,tmdb", "tmdb", "fanart"))
       and "'model': 'image_sources'" in form_json)
+check("无本语言海报时的回退顺序：默认只有 textless（绝不用外文海报）",
+      defaults["poster_fallbacks"] == "textless"
+      and module.poster_fallback_order(defaults["poster_fallbacks"]) == ["textless"]
+      and "'model': 'poster_fallbacks'" in form_json)
+check("回退顺序下拉首选项就是「只回退无文字海报」",
+      "'title': '无文字海报（推荐：绝不用外文海报）', 'value': 'textless'" in form_json)
+check("回退说明写明：中文优先 → 无文字 → 不写，并说明宁缺毋滥",
+      "元数据语言" in form_json and "无文字海报" in form_json
+      and "绝不拿外文海报凑数" in form_json)
 check("图片类型已扩到 8 类，且标注了数据来源（TMDB + fanart.tv）",
       len(module.IMAGE_KINDS) == 8
       and "fanart.tv" in form_json and "FANART_API_KEY" in form_json)
@@ -1015,6 +1024,58 @@ check("④ 报告里能读到这条缺失说明",
 
 print()
 print("=" * 70)
+print("语言回退：在线只有外文海报时，报告必须说清「为什么不写」")
+print("=" * 70)
+
+
+class _LangRejectProvider:
+    """模拟 TMDB：海报候选全是日文/英文，一张中文与无文字都没有。"""
+
+    def __init__(self):
+        self.lang_rejected = {}
+        self.language = "zh-CN"# _describe_rejection 要读它
+
+    def fetch_movie(self, tmdb_id):
+        # NFO 字段比对也要元数据，给一份干净的在线值（与本地一致 → 不产生字段改动）
+        return {"title": "某片", "year": 2020}
+
+    def fetch_images(self, tmdb_id, media_type, season=None, episode=None, kinds=()):
+        for kind in kinds:
+            if kind == "poster":
+                self.lang_rejected[kind] = module.TmdbProvider._describe_rejection(
+                    self, [{"iso_639_1": "ja"}, {"iso_639_1": "en"}])
+        return {}                      # 严格模式下不放行任何语言
+
+
+_movie_root = DATA_PATH / "langlib"
+_movie_dir = _movie_root / "电影" / "某片 (2020) {tmdbid=312949}"
+_movie_dir.mkdir(parents=True, exist_ok=True)
+(_movie_dir / "movie.nfo").write_text(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<movie>\n'
+    '  <title>某片</title>\n  <tmdbid>312949</tmdbid>\n</movie>\n', encoding="utf-8")
+
+_lang_provider = _LangRejectProvider()
+_lang_report = module.Engine(
+    module.EngineConfig(roots=[_movie_root], mode="sync", image_mode="sync",
+                        image_kinds={"poster"},
+                        manifest_path=DATA_PATH / "lang_manifest.json"),
+    _lang_provider).run()
+_lang_text = _lang_report.to_text()
+check("语言不合时不会写出 poster.jpg（宁可不写也不写外文）",
+      not (_movie_dir / "poster.jpg").exists(),
+      str(sorted(p.name for p in _movie_dir.iterdir())))
+check("报告里点明在线只有哪些语言的图、以及为什么不写",
+      "没有合适语言的图" in _lang_text and "日文" in _lang_text
+      and "不拿外文海报凑数" in _lang_text, _lang_text[-400:])
+check("语言不合时不会被误记成「在线压根没这张图」",
+      "没有 中文 版" in _lang_text and "在线无此图" not in _lang_text,
+      _lang_text[-300:])
+check("语言不合不计入 images_missing（那是「在线无图」的计数）",
+      _lang_report.images_missing == 0, f"images_missing={_lang_report.images_missing}")
+shutil.rmtree(_movie_root, ignore_errors=True)
+
+print()
+print("=" * 70)
 print("fanart.tv：光盘图 / 横幅图 / 透明艺术图 / 横版缩略图")
 print("=" * 70)
 _orig_urlopen = module.urllib.request.urlopen
@@ -1376,8 +1437,136 @@ best = module.pick_best_image(candidates, "zh-CN")
 check("同语言优先（选到 zh 那张，而不是票数最高的 en）",
       best is not None and best["file_path"] == "/zh_small.jpg")
 best_other = module.pick_best_image([c for c in candidates if c["iso_639_1"] != "zh"], "ja-JP")
-check("无本语言时：无文字版优先于英文版",
+check("无本语言、也没给原始语言时：无文字版优先于英文版",
       best_other is not None and best_other["file_path"] == "/textless.jpg")
+
+# ── 无本语言海报时的回退：默认「中文 → 无文字海报」，绝不回退外文 ──
+# 场景取自真实数据（TMDB id 312949 尼古喵喵）：
+#   尼古喵喵 14 张海报：zh=3 ja=3 null=3 en=5
+#     · 元数据语言=中文 → 3 张中文里挑第一张（带中文标题的那张）
+#     · 若把中文候选剔掉 → 应退到 3 张无文字里的第一张，**不是**日文/英文
+#     · 若连无文字也没有 → 返回 None（宁可空着，也不拿外文海报凑数）
+n_fallback = [
+    {"file_path": "/zh.jpg", "iso_639_1": "zh"},          # 中文海报（带中文标题）
+    {"file_path": "/ja_first.jpg", "iso_639_1": "ja"},    # 日文标题
+    {"file_path": "/en.jpg", "iso_639_1": "en"},          # 英文标题
+    {"file_path": "/textless.jpg", "iso_639_1": None},    # 无文字
+]
+check("元数据语言=中文且有中文海报 → 选中文（尼古喵喵场景）",
+      module.pick_best_image(n_fallback, "zh-CN")["file_path"] == "/zh.jpg")
+no_zh = [c for c in n_fallback if c["iso_639_1"] != "zh"]
+check("无中文海报 → 回退无文字海报，**不**选日文",
+      module.pick_best_image(no_zh, "zh-CN", "ja")["file_path"] == "/textless.jpg")
+check("无中文、候选里只剩英文/日文时也不会被选中（默认只认无文字）",
+      module.pick_best_image([c for c in no_zh if c["file_path"] in ("/en.jpg",)],
+                              "zh-CN", "ja") is None)
+check("连无文字海报都没有 → 返回 None（宁可���写，也不拿外文海报凑数）",
+      module.pick_best_image([c for c in no_zh if c["iso_639_1"] in ("ja", "en")],
+                              "zh-CN", "ja") is None)
+check("元数据语言=英文时，英文海报优先（规则跟着「元数据语言」走）",
+      module.pick_best_image(n_fallback, "en-US", "ja")["file_path"] == "/en.jpg")
+check("元数据语言=日文时，日文海报优先",
+      module.pick_best_image(n_fallback, "ja-JP", "ja")["file_path"] == "/ja_first.jpg")
+check("回退顺序可配：显式加入 en 后才会选英文（无文字档仍优先于英文）",
+      module.pick_best_image(
+          [{"file_path": "/en.jpg", "iso_639_1": "en"},
+           {"file_path": "/textless.jpg", "iso_639_1": None}],
+          "zh-CN", "ja", "textless,en")["file_path"] == "/textless.jpg")
+check("回退顺序可配：把 en 排在 textless 前，则选英文",
+      module.pick_best_image(
+          [{"file_path": "/en.jpg", "iso_639_1": "en"},
+           {"file_path": "/textless.jpg", "iso_639_1": None}],
+          "zh-CN", "ja", "en,textless")["file_path"] == "/en.jpg")
+check("回退顺序可配：显式加入 original 后才会选日文",
+      module.pick_best_image([{"file_path": "/ja.jpg", "iso_639_1": "ja"}],
+                              "zh-CN", "ja", "textless,original")["file_path"] == "/ja.jpg")
+
+# poster_fallback_order：配置收敛
+check("回退顺序默认 = 只有 textless（绝不用外文海报）",
+      module.poster_fallback_order(None) == ["textless"])
+check("回退顺序吃逗号串并保序",
+      module.poster_fallback_order("textless,en,original")
+      == ["textless", "en", "original"])
+check("回退顺序吃列表并丢弃非法值",
+      module.poster_fallback_order(["en", "bogus"]) == ["en"])
+check("回退顺序全是非法值时回落默认 textless（不会变成空、也不会放宽成外文）",
+      module.poster_fallback_order(["bogus", "xxx"]) == ["textless"])
+# ★ 白名单必须用「可选档位全集」而不是「默认档位」——
+#   曾经写成 `part in POSTER_FALLBACKS`，默认只有 textless，于是 en/original
+#   永远被当非法值丢掉、界面上能选的宽松模式实际配不进去。
+check("可选档位全集含三个档，且与默认档位区分开",
+      module.POSTER_FALLBACK_CHOICES == ("textless", "en", "original")
+      and module.POSTER_FALLBACKS == ("textless",))
+
+# 「在线有图但没有一张符合语言」必须能被说清（与「在线压根没这张图」区分开）
+_rej = module.TmdbProvider.__new__(module.TmdbProvider)
+_rej.language = "zh-CN"
+_desc = module.TmdbProvider._describe_rejection(_rej, [
+    {"iso_639_1": "ja"}, {"iso_639_1": "en"}, {"iso_639_1": "ja"}])
+check("语言拒绝原因里能点出在线有哪些语言、且提到不放行规则",
+      "日文" in _desc and "英文" in _desc and "没有 中文 版" in _desc
+      and "不拿外文海报凑数" in _desc, _desc)
+check("语言拒绝原因：无文字版也算一种语言，会被单独点出来",
+      "无文字" in module.TmdbProvider._describe_rejection(
+          _rej, [{"iso_639_1": None}]), module.TmdbProvider._describe_rejection(
+          _rej, [{"iso_639_1": None}]))
+check("语言拒绝原因：未知语言码原样显示，不编造名称",
+      "xx" in module.TmdbProvider._describe_rejection(_rej, [{"iso_639_1": "xx"}]))
+
+# ★ `_probe_foreign_langs`：严格模式下候选为空时补一次探测，
+#   否则「在线有外文图但按规则不放行」这个最需要解释的场景恰恰解释不出来。
+#   真实坑：TMDB 的 include_image_language **省略掉 / 传空串都拿不到全部语言**
+#   （Friends tmdb_id=2420 实测两种写法都返回 0 张），必须显式枚举语言码。
+class _ProbeProvider(module.TmdbProvider):
+    """按 include_image_language 模拟 TMDB 的服务端过滤。"""
+
+    ALL = {"zh": None, "null": None, "en": None, "ja": None, "fr": None}
+
+    def __init__(self):
+        self.api_key = "K"
+        self.language = "zh-CN"
+        self.api_host = "https://api.tmdb.org/3"
+        self.img_host = "https://image.tmdb.org/t/p/"
+        self.source_order = ["tmdb"]
+        self.poster_fallbacks = ["textless"]
+        self.lang_rejected = {}
+        self.calls = 0
+        self.seen_includes = []
+
+    def image_size(self, kind):
+        return "w500"
+
+    def _get(self, path, **params):
+        self.calls += 1
+        inc = params.get("include_image_language")
+        self.seen_includes.append(inc)
+        langs = [x.strip() for x in str(inc).split(",") if x.strip()] if inc else []
+        if not langs:
+            return {"posters": []}          # 与真实 TMDB 一致：不给语言 → 空
+        # 数据：只有 1 张英文 poster，无中文、无无文字
+        pool = [{"file_path": "/en_only.jpg", "iso_639_1": "en"}]
+        got = [it for it in pool
+               if (it["iso_639_1"] in langs) or ("null" in langs and not it["iso_639_1"])]
+        return {"posters": got}
+
+
+_prov = _ProbeProvider()
+_out = _prov.fetch_images("2420", "tvshow", kinds=["poster"])
+check("严格模式遇到「只有外文图」→ 不写该类型",
+      "poster" not in _out, str(_out))
+check("★ 会额外发一次探测请求（否则报告解释不清为什么不写）",
+      _prov.calls == 2, f"calls={_prov.calls} includes={_prov.seen_includes}")
+check("★ 探测请求显式枚举语言码（省略/空串在真实 TMDB 上只会拿到 0 张）",
+      _prov.seen_includes[-1] and "en" in _prov.seen_includes[-1]
+      and "ja" in _prov.seen_includes[-1], str(_prov.seen_includes[-1]))
+check("★ 探测到外文图后给出可读说明，而不是笼统的「在线没图」",
+      "poster" in _prov.lang_rejected
+      and "英文" in _prov.lang_rejected["poster"]
+      and "没有 中文 版" in _prov.lang_rejected["poster"],
+      str(_prov.lang_rejected))
+# 探测只用于写说明，绝不能把外文图放行成结果
+check("★ 探测到的外文图**不会**被当成结果返回",
+      all("en_only" not in v for v in _out.values()), str(_out))
 
 # 同级不再比分辨率/评分/票数 —— 取原始顺序第一条（对齐 MP 的"钦定图"行为）
 best_res = module.pick_best_image(

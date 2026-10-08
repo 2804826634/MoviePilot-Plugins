@@ -185,7 +185,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.7.7"
+PLUGIN_VERSION = "1.7.8"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -277,6 +277,56 @@ IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
 # 以后哪个源补上了新类型也能自动吃到。
 IMAGE_SOURCES: Tuple[str, ...] = ("tmdb", "fanart")
 IMAGE_SOURCE_CN = {"tmdb": "TMDB", "fanart": "fanart.tv"}
+
+# ── 无本语言海报时的回退顺序 ───────────────────────────────────────────
+# 第一优先级永远是**本语言**（= 插件的「元数据语言」配置，如 zh-CN）。
+# 本语言一张海报都没有时（TMDB 上很常见：老番 / 冷门片常没人上传中文海报），
+# 按这里的顺序继续挑。可选档位：
+#   textless  → 无文字版（iso_639_1 为空，纯画面、不带任何文字）
+#   en        → 英文标题
+#   original  → 原始语言标题（original_language，动漫多为日文）
+#
+# ★ 默认只有 textless —— 用户明确要求：「元数据语言=中文时优��中文海报，
+#   没有中文就回退无文字海报，**不要**回退到英文或日文等其它语言文字」。
+#   所以默认链路是 中文 → 无文字 →（没有就明确不写，绝不换成外文海报）。
+#   想放宽时可在设置页把 en / original 加进回退链（自己承担观感不统一的后果）。
+POSTER_FALLBACKS: Tuple[str, ...] = ("textless",)
+# 可选档位的**全集**（= 设置页下拉里能选到的值）。
+# ★ 注意别拿 POSTER_FALLBACKS 当白名单用：它是「默认值」，只有 textless 一档；
+#   早先校验写成 `part in POSTER_FALLBACKS`，导致 en / original 永远被当非法值丢掉，
+#   「放宽回退」的选项形同虚设（单测「把 en 排在 textless 前则选英文」就挂在这）。
+POSTER_FALLBACK_CHOICES: Tuple[str, ...] = ("textless", "en", "original")
+POSTER_FALLBACK_CN = {
+    "textless": "无文字海报（纯画面、无任何文字）",
+    "en": "英文标题海报",
+    "original": "原始语言标题海报（动漫多为日文）",
+}
+
+# 报告里描述「在线这张图都有哪些语言」时用的中文明细
+LANG_CN = {
+    "zh": "中文", "en": "英文", "ja": "日文", "ko": "韩文",
+    "tw": "中文（繁体）", "fr": "法文", "de": "德文", "es": "西班牙文",
+    "it": "意大利文", "pt": "葡萄牙文", "ru": "俄文", "th": "泰文",
+    "vi": "越南文", "hi": "印地文", "ar": "阿拉伯文", "sv": "瑞典文",
+    "da": "丹麦文", "nl": "荷兰文", "pl": "波兰文", "tr": "土耳其文",
+}
+
+
+def poster_fallback_order(raw: Any = None) -> List[str]:
+    """把「无本语言海报时的回退顺序」收敛成有序列表。
+
+    吃列表（UI 下拉）或逗号字符串（老配置 / CLI），非法值丢弃；
+    全部非法或缺失时回落到默认 `POSTER_FALLBACKS`（永不返回空）。
+    """
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(item).strip().lower() for item in raw]
+    else:
+        parts = [piece.strip().lower() for piece in str(raw or "").split(",")]
+    order: List[str] = []
+    for part in parts:
+        if part in POSTER_FALLBACK_CHOICES and part not in order:
+            order.append(part)
+    return order or list(POSTER_FALLBACKS)
 
 
 def image_source_order(raw: Any = None) -> List[str]:
@@ -1263,43 +1313,56 @@ def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root
         raise last_exc
 
 
-def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
+def pick_best_image(entries: List[dict], language: str,
+                    original_lang: str = "", fallbacks: Any = None) -> Optional[dict]:
     """从 TMDB 的图片数组里挑一张。
 
-    **只按语言优先级挑**，不再掺入分辨率 / 评分 / 投票数 —— 语言相同的那一批里
+    **只按语言优先级挑**，不再掺入分辨率 / 评分 / 投票数 —— 同一档里
     直接取 TMDB 返回顺序里的第一条（TMDB 自身就是按官方推荐度排的，越靠前越"钦定"）。
 
-    语言顺序：本语言 → 无文字版（iso_639_1 为空）→ 英文 → 其它语言。
-    这样做是为了与 MP 官方保持一致：MP 对根目录的 poster/backdrop/logo 直接取
-    TMDB 主记录里那一张（不带任何挑选），本函数取"同语言里的第一条"最接近该行为。
+    语言顺序：
+        1. **本语言**（`language`，即插件的「元数据语言」，如 zh-CN）—— 永远第一优先；
+        2. 本语言一张都没有时，按 `fallbacks` 依次匹配。**默认只有 `textless`**
+           （`iso_639_1` 为空的无文字海报）—— 即「元数据语言=中文时优先中文海报，
+           没有中文海报就回退无文字海报」；
+        3. 匹配不上 → **返回 None**，明确表示「没有合适的图」，由上层记为该类型缺失。
+
+    ★ 第3 步是关键：这里**绝不**兜底「随便给一张」。早先版本会，于是没有中文海报的
+      片子拿到英文或日文标题海报（同一个库里观感割裂：一半中文标题、一半日文标题）。
+      现在宁可**不写这一张**，也不拿外文海报凑数；需要放宽时可把 en / original
+      加进设置页的「回退顺序」里（自己承担观感不统一的后果）。
+
+    这样与 MP 官方一致：MP 对根目录的 poster/backdrop/logo 直接取 TMDB 主记录里
+    那一张（`MediaInfo.poster_path` 等），不带挑选；本函数取"同语言里的第一条"
+    最接近该行为。
 
     注意：早先版本还会比「分辨率越大越好 → 评分 → 投票数」，会挑出与 MP 不同的图
     （TMDB 钦定图未必是分辨率最大的），表现为"两边图不一样"，故去掉。
     """
     lang = (language or "").split("-")[0].lower()
+    orig = (original_lang or "").split("-")[0].lower()
+    order = poster_fallback_order(fallbacks)
 
-    def lang_rank(item: dict) -> int:
+    def lang_rank(item: dict):
+        """0 = 本语言；1..N = 回退档位；**None = 不该选它**。"""
         code = (item.get("iso_639_1") or "").lower()
         if lang and code == lang:
             return 0
-        if not code:
-            return 1
-        if code == "en":
-            return 2
-        return 3
+        for idx, key in enumerate(order, start=1):
+            if key == "textless" and not code:
+                return idx
+            if key == "en" and code == "en":
+                return idx
+            if key == "original" and orig and code == orig:
+                return idx
+        return None                     # 其它语言一律不选
 
-    best: Optional[dict] = None
-    best_rank = 99
-    for item in entries or []:
-        if not item.get("file_path"):
-            continue
-        rank = lang_rank(item)
-        # 严格小于：语言更优才替换；同级保留先出现的（= TMDB 原始顺序第一条）
-        if rank < best_rank:
-            best, best_rank = item, rank
-        if best_rank == 0:
-            break
-    return best
+    eligible = [(item, lang_rank(item)) for item in (entries or []) if item.get("file_path")]
+    eligible = [(item, rank) for item, rank in eligible if rank is not None]
+    if not eligible:
+        return None
+    # 语言档位升序；同级保持 TMDB 原始顺序（越靠前越钦定）
+    return min(eligible, key=lambda pair: pair[1])[0]
 
 
 def image_size_for(quality: str, kind: str) -> str:
@@ -1379,7 +1442,7 @@ class TmdbProvider:
     def __init__(self, api_key: str, language: str = "zh-CN", proxy: Optional[str] = None,
                  cert_country: str = "US", cast_limit: int = 20,
                  image_quality: str = "standard", concurrency: int = 1,
-                 source_order: Any = None):
+                 source_order: Any = None, poster_fallbacks: Any = None):
         self.api_key = api_key
         self.language = language
         self.cert_country = (cert_country or "US").upper()
@@ -1387,6 +1450,13 @@ class TmdbProvider:
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
         # 图片来源优先级（默认 TMDB → fanart.tv）
         self.source_order = image_source_order(source_order)
+        # 无本语言海报时的回退顺序（默认只有「无文字」，绝不用外文海报）
+        self.poster_fallbacks = poster_fallback_order(poster_fallbacks)
+        # 原始语言缓存（tmdb_id → original_language），避免重复请求主记录
+        self._orig_lang_cache: Dict[str, str] = {}
+        # 在线有这类型的图、但**没有一张符合语言规则** → {类型: 人话说明}
+        # 与「在线压根没这张图」区分开，报告里要能说清到底是哪种缺失。
+        self.lang_rejected: Dict[str, str] = {}
         # 图片域名跟随宿主配置（国内直连 image.tmdb.org 经常超时，MP 允许换镜像）
         self.img_host = image_host()
         # 接口域名同理可覆盖（默认 api.themoviedb.org；被拦时可换 api.tmdb.org）
@@ -1413,8 +1483,11 @@ class TmdbProvider:
 
         接口域名走 `tmdb_api_host()`：默认 api.themoviedb.org，
         被网关整段拦掉时可在宿主设置里把 `TMDB_API_DOMAIN` 换成 api.tmdb.org。
+
+        参数值为 `None` 的会被整个丢掉（不发这个 key）。
         """
         params.update({"api_key": self.api_key, "language": self.language})
+        params = {k: v for k, v in params.items() if v is not None}
         url = f"{self.api_host}{path}?{urllib.parse.urlencode(params)}"
         last_error = ""
         for attempt in range(1, TMDB_RETRIES + 1):
@@ -1608,7 +1681,6 @@ class TmdbProvider:
         已经在 out 里的类型不再覆盖 —— 「先到先得」即优先级。
         """
         lang = (self.language or "").split("-")[0].lower()
-        include = ",".join([part for part in (lang, "en", "null") if part])
         if media_type == "movie":
             path = f"/movie/{tmdb_id}/images"
         elif media_type == "tvshow":
@@ -1619,11 +1691,30 @@ class TmdbProvider:
             path = f"/tv/{tmdb_id}/season/{season}/episode/{episode}/images"
         else:
             return
+        # `include_image_language` 决定 TMDB **在服务端**返回哪些语言的图 ——
+        # 没写进去的语言，再怎么选图也拿不到。所以要按回退链把用得上的语言都写上。
+        # 默认回退链只有 textless（无文字），故默认只需 本语言 + null；
+        # 用户把 en / original 加进回退链时，才额外去请求这两种语言。
+        # （实测：原始语言 ja、language=zh-CN，默认只请求 zh,null 时只返回
+        #   11 张（不含 ja）；把 ja 加进来才返回 20 张、其中 9 张 ja。）
+        order = self.poster_fallbacks
+        wanted = [lang, "null"]
+        if "en" in order and "en" not in wanted:
+            wanted.append("en")
+        original_lang = ""
+        if "original" in order:
+            original_lang = self._original_language(tmdb_id, media_type)
+            if original_lang and original_lang not in wanted:
+                wanted.append(original_lang)
+        include = ",".join(part for part in wanted if part)
         data = self._get(path, include_image_language=include)
         if not data:
             return
         # 单集的缩略图是「这一集的剧照」，走 TMDB 的 stills（与根目录的横版缩略图不同）
         episode_thumb_key = "stills" if media_type == "episodedetails" else None
+        # 某个类型「按规则没选到」且**候选本身为空**时，要不要补一次全语言探测？
+        # 见 _probe_missing_langs 的注释：一律要探，否则解释不清为什么没写。
+        need_probe: List[str] = []
         for kind in kinds:
             if kind in out:
                 continue
@@ -1632,9 +1723,96 @@ class TmdbProvider:
                 # 电影/剧集/季的 thumb 不在 TMDB 的键里（TMDB 的 stills 是剧照，
                 # 不是横版缩略图），留给 fanart 的 tvthumb / moviethumb
                 continue
-            best = pick_best_image(data.get(api_key) or [], self.language)
+            entries = data.get(api_key) or []
+            best = pick_best_image(entries, self.language, original_lang, order)
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
+            elif entries:
+                # ★ 关键：有候选，但没有一张符合语言要求。这与「在线压根没这张图」
+                #   是两回事，必须能说清楚 —— 否则用户只看到「没写海报」，
+                #   根本不知道是 TMDB 上传了外文图、而本插件按规则不放行。
+                self.lang_rejected[kind] = self._describe_rejection(entries)
+            elif kind not in need_probe:
+                need_probe.append(kind)
+        # ★ `include_image_language` 是**服务端**过滤：不在列表里的语言 TMDB 根本不返回。
+        #   所以严格模式下（只请求 zh,null）遇到「只有外文图」的条目时，
+        #   `entries` 会是**空**的 —— 上面那个 `elif entries` 压根不成立，
+        #   用户只会看到「在线没这张图」，看不到真相。
+        #   典型实测：Friends (tmdb_id=2420) 的 poster 只有 1 张英文，
+        #   只请求 zh,null 时 TMDB 返回 0 张；不限制语言才看得见那张英文。
+        #   这里对没选中的类型补一次**全语言**探测请求，只为把「在线其实有什么语言」
+        #   查清楚写进报告 —— 探测结果绝不用于选图。
+        for kind in need_probe:
+            if kind in self.lang_rejected:
+                continue
+            api_key = IMG_API_KEYS.get(kind) or (episode_thumb_key if kind == "thumb" else None)
+            foreign = self._probe_foreign_langs(path, api_key)
+            if foreign:
+                self.lang_rejected[kind] = self._describe_rejection(foreign)
+
+    def _probe_foreign_langs(self, path: str, api_key: str) -> List[dict]:
+        """补一次**不限语言**的图片请求，只为查清「在线其实有哪些语言的图」。
+
+        ★ 为什么要多这一次请求：`include_image_language` 是服务端过滤，
+          严格模式只请求 `zh,null`，于是「只有外文图」的条目返回的是**空列表**
+          （实测 Friends tmdb_id=2420 的 poster：只请求 zh,null → 0 张；
+          不限语言 → 1 张英文）。没有这次探测，报告里就只会写「在线没有海报」，
+          用户完全看不出真相是「TMDB 上有英文海报、但按设置不放行」。
+
+        返回值只用于生成说明文案，**绝不**拿去选图。
+        失败（网络/限流/404）一律返回空，不影响主流程。
+
+        ⚠️ 实测坑：TMDB 的 `include_image_language` **省略掉**也拿不到全部语言 ——
+          Friends (2420) 的 poster在「无该参数」和「空串」两种写法下都只返回 0 张，
+          必须显式列出语言码才行。所以这里显式枚举一批常见语言（一次请求即可覆盖）。
+        """
+        # 常见语言码足够覆盖「用户会看到的那些外文图」，只为写说明，不必全量枚举。
+        probe_langs = ",".join(
+            ("zh", "null", "en", "ja", "ko", "fr", "de", "es", "it",
+             "pt", "ru", "th", "vi", "hi", "ar", "sv", "da", "nl", "pl", "tr"))
+        try:
+            data = self._get(path, include_image_language=probe_langs) or {}
+        except Exception:
+            return []
+        return list(data.get(api_key) or [])
+
+    def _describe_rejection(self, entries: List[dict]) -> str:
+        """把「在线有哪些语言的图」说成一句人话，写进报告/ 日志。
+
+        例如 `en/ja` → 「在线只有英文/日文海报，按「不拿外文海报凑数」的规则已跳过」。
+        无文字（`iso_639_1` 为空）算一种可接受档位，所以这里出现它时不至于被跳过。
+        """
+        langs: List[str] = []
+        for item in entries or []:
+            code = (item.get("iso_639_1") or "").strip().lower()
+            label = LANG_CN.get(code) or (code if code else "无文字")
+            if label not in langs:
+                langs.append(label)
+        want = LANG_CN.get((getattr(self, "language", "") or "").split("-")[0].lower()) \
+            or (getattr(self, "language", "") or "本语言")
+        return (f"在线这类型只有 {'/'.join(langs)} 的图，没有 {want} 版、"
+                f"也没有无文字版；按「不拿外文海报凑数」的规则已跳过（未写入）")
+
+    def _original_language(self, tmdb_id: str, media_type: str) -> str:
+        """取该条目的原始语言（original_language），带缓存。
+
+        只有电影 / 剧集的主记录里有这个字段（季 / 单集没有），
+        且它是**整条记录级别的**，与请求时用的 language 参数无关。
+        取不到（网络失败 / 404）就返回空串，回退逻辑自然跳过 original 档。
+        """
+        if media_type not in ("movie", "tvshow"):
+            return ""
+        cached = self._orig_lang_cache.get(tmdb_id)
+        if cached is not None:
+            return cached
+        path = f"/movie/{tmdb_id}" if media_type == "movie" else f"/tv/{tmdb_id}"
+        try:
+            data = self._get(path) or {}
+        except Exception:
+            data = {}
+        value = str(data.get("original_language") or "").strip().lower()
+        self._orig_lang_cache[tmdb_id] = value
+        return value
 
     def _fetch_fanart_images(self, tmdb_id: str, media_type: str, season: Optional[str],
                              kinds: Any, out: Dict[str, str]) -> None:
@@ -2601,8 +2779,12 @@ class Engine:
         targets = image_targets(nfo, self.cfg.image_kinds, season=season)
         if not targets:
             return 0
+        # 清掉上一条目的语言拒绝记录，避免串味（provider 是复用的）
+        if hasattr(self.provider, "lang_rejected"):
+            self.provider.lang_rejected.clear()
         urls = self.fetch_remote_images(nfo, {spec.kind for spec, _ in targets})
-        if not urls:
+        rejected = getattr(self.provider, "lang_rejected", None) or {}
+        if not urls and not rejected:
             # 一季可能在线什么素材都没有。以前这里直接返回什么都不记，
             # 于是「该季海报缺失」在输出里完全看不出来 —— 现在明确标注（且绝不回退）。
             if nfo.media_type == "season" and "poster" in self.cfg.image_kinds:
@@ -2621,6 +2803,14 @@ class Engine:
             label = f"[图片] {spec.kind} → {path.name}" + ("（别名）" if spec.alias else "")
             url = urls.get(spec.kind)
             if not url:
+                reason = rejected.get(spec.kind)
+                if reason:
+                    # 在线**有**这类型的图，但一张都不符合语言规则 → 明确说清是哪回事，
+                    # 否则用户只看到「没写海报」，不知道是有中文图之外的选择被主动放弃。
+                    logger.info(f"{rel}：{reason}")
+                    self.__image_change(rel, "未比对", "跳过（没有合适语言的图）",
+                                        label, reason, "")
+                    continue
                 # 在线没有这张图。**明确标记、绝不回退** ——
                 # 不能用「剧集海报」或「别的季的海报」来顶替某一季的海报。
                 if spec.kind == "poster" and nfo.media_type == "season":
@@ -2755,6 +2945,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _fanart_image_kinds: Any = FANART_IMAGE_KINDS  # fanart 下拉（界面展示）
     _image_quality: str = "standard"
     _image_sources: Any = IMAGE_SOURCES      # 统一由 image_source_order 收敛成有序列表
+    _poster_fallbacks: Any = POSTER_FALLBACKS  # 无本语言海报时的回退顺序
     _event: Event = Event()
     _timer: Optional[threading.Timer] = None
 
@@ -2808,6 +2999,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._image_quality = config.get("image_quality") or "standard"
             # 图片来源优先级：收敛成有序列表，非法值顺手修正回默认
             self._image_sources = image_source_order(config.get("image_sources"))
+            # 无本语言海报时的回退顺序：同样收敛成有序列表并回写修正
+            fallbacks = poster_fallback_order(config.get("poster_fallbacks"))
+            if config.get("poster_fallbacks") != ",".join(fallbacks):
+                repair["poster_fallbacks"] = ",".join(fallbacks)
+            self._poster_fallbacks = fallbacks
 
         self.stop_service()
 
@@ -2974,6 +3170,37 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                          "（单集另有剧照），而横幅图、光盘图、透明艺术图、横版缩略图"
                                          "（thumb / landscape）**只有 fanart.tv 有** —— 这几类无论"
                                          "顺序如何都只能取到 fanart 的。"}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "poster_fallbacks",
+                                    "label": "没有本语言海报时，回退到",
+                                    "items": [
+                                        {"title": "无文字海报（推荐：绝不用外文海报）", "value": "textless"},
+                                        {"title": "无文字海报 → 英文 → 原始语言", "value": "textless,en,original"},
+                                        {"title": "无文字海报 → 原始语言（日文）→ 英文", "value": "textless,original,en"},
+                                        {"title": "英文 → 无文字海报（不建议）", "value": "en,textless"},
+                                        {"title": "英文 → 无文字海报 → 原始语言", "value": "en,textless,original"},
+                                        {"title": "原始语言（日文）→ 无文字海报", "value": "original,textless"},
+                                    ]}}]},
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "海报的第一优先永远是**本语言**，也就是上面「元数据语言」"
+                                         "选的那个（如「简体中文」→ 中文海报）。"
+                                         "但 TMDB 上很多老番 / 冷门片**根本没人上传中文海报**"
+                                         "（例如《尼古喵喵》14 张海报里只有 3 张中文，"
+                                         "剩下是日文 / 英文 / 无文字各若干），"
+                                         "这时按这里的顺序继续挑。"
+                                         "**默认只回退到「无文字海报」**（纯画面、不带任何文字）—— "
+                                         "刻意**不**回退到英文 / 日文等其它语言文字的海报，"
+                                         "否则同一个库里会混着中文海报和日文海报，观感割裂。"
+                                         "若连无文字海报也没有，就**不写这一张**并在报告里标注"
+                                         "「在线没有合适语言的海报」，绝不拿外文海报凑数。"
+                                         "确实想放宽时再选带英文 / 原始语言的选项。"}]},
                         ],
                     },
                     {
@@ -3229,6 +3456,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "fanart_image_kinds": list(FANART_IMAGE_KINDS),
             "image_quality": "standard",
             "image_sources": ",".join(IMAGE_SOURCES),
+            "poster_fallbacks": ",".join(POSTER_FALLBACKS),
         }
 
     def get_page(self) -> List[dict]:
@@ -3411,6 +3639,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "fanart_image_kinds": self._fanart_image_kinds,
                 "image_quality": self._image_quality,
                 "image_sources": ",".join(self._image_sources),
+                "poster_fallbacks": ",".join(self._poster_fallbacks),
             })
         except Exception as exc:
             logger.warning(f"保存插件配置失败：{exc}")
@@ -3463,10 +3692,13 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "，代理沿用宿主的" if proxy else ""))
             logger.info("图片来源优先级：" + " → ".join(
                 IMAGE_SOURCE_CN.get(s, s) for s in self._image_sources))
+            logger.info("无本语言海报时回退顺序：" + " → ".join(
+                POSTER_FALLBACK_CN.get(s, s) for s in self._poster_fallbacks))
             return TmdbProvider(key, self._language, proxy or None,
                                 self._cert_country, limit, quality,
                                 concurrency=self._concurrency,
-                                source_order=self._image_sources)
+                                source_order=self._image_sources,
+                                poster_fallbacks=self._poster_fallbacks)
         logger.warning("插件与 MoviePilot 都没有可用的 TMDB API Key，改用宿主刮削通道"
                        "（该通道只能取到海报与背景图，徽标 / 剧集缩略图 / 季海报将不可用）")
         return HostProvider(quality, limit)
@@ -3591,10 +3823,13 @@ def build_cli_provider(args) -> Any:
     if not args.api_key:
         raise SystemExit("--source tmdb 需要 --api-key，或设置环境变量 TMDB_API_KEY")
     order = image_source_order(args.image_sources)
+    fallbacks = poster_fallback_order(args.poster_fallbacks)
     logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
+    logger.info("无本语言海报时回退顺序：" + " → ".join(
+        POSTER_FALLBACK_CN.get(s, s) for s in fallbacks))
     return TmdbProvider(args.api_key, args.lang, args.proxy or None, args.cert_country,
                         args.cast_limit, args.image_quality,
-                        source_order=order)
+                        source_order=order, poster_fallbacks=fallbacks)
 
 
 def cli_main(argv: Optional[List[str]] = None) -> int:
@@ -3640,6 +3875,10 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                         help="图片画质，默认 standard（海报 w780 / 背景图 w1280 / 徽标 w500）")
     parser.add_argument("--image-sources", default="tmdb,fanart",
                         help="图片来源优先级，逗号分隔，默认 tmdb,fanart（TMDB 优先，fanart 兜底）")
+    parser.add_argument("--poster-fallbacks", default="textless",
+                        help="没有本语言海报时的回退顺序，逗号分隔，"
+                             "可选 textless/en/original，默认 textless（只回退无文字海报，"
+                             "不用外文海报；全都不匹配时该类型不写）")
     parser.add_argument("--image-manifest", default="",
                         help="图片指纹清单路径，默认 <第一个媒体库目录>/.nfo-backup/image_manifest.json")
     parser.add_argument("--json", dest="json_out", default="", help="把完整报告写入 JSON")
