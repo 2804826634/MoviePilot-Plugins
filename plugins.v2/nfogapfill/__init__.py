@@ -192,7 +192,17 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.8.4"
+PLUGIN_VERSION = "1.8.5"
+# 插件图标：**必须是绝对 URL**。
+# MP 取图标的路径有两条（app/core/plugin.py）：
+#   · 已安装插件 → 读本类的 plugin_icon 属性（第 1427 行）
+#   · 市场里的插件 → 读 package.v2.json 的 "icon" 字段（第 1688 行）
+# 而 MP 安装插件时**只下载 plugins.v2/{插件ID}/** 下的文件（见 __get_file_list），
+# 仓库根目录的 icons/ 不会进插件目录 —— 所以这里写裸文件名（如 "NfoGapFill.png"）
+# 在已安装插件卡片上必然是 404、图标空白。这里和 package.v2.json 的 icon
+# 必须指向同一个地址，改成 CDN 是因为 raw.githubusercontent.com 在国内常被挡。
+PLUGIN_ICON = ("https://cdn.jsdelivr.net/gh/2804826634/MoviePilot-Plugins@main/"
+               "icons/nfogapfill.png")
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -2897,16 +2907,78 @@ class Engine:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 设置页表单的小工厂
+# ══════════════════════════════════════════════════════════════════════
+# get_form() 原本是 313 行手写的嵌套字典：同一个 VCol / VRow 外壳被抄了
+# 19 遍和 27 遍，加一个配置项要写 8 行、缩进到 12 层。
+# 下面这组函数把那层样板收敛掉 —— **一个控件一行**，缩进降到 3 层。
+#
+# 约定：所有控件函数都返回一个 **VCol**（列），由 form_row() 拼成一行。
+#       下拉的选项用 {value: 显示名} 的字典写，比 {"title":…,"value":…} 短一半。
+def form_col(content: Any, md: int = 12) -> dict:
+    """把控件包成一列。`cols: 12` = 窄屏占满，`md` = 宽屏占几分之十二。"""
+    return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [content]}
+
+
+def form_row(*cols: Any) -> dict:
+    """把若干列拼成一行。"""
+    return {"component": "VRow", "content": list(cols)}
+
+
+def form_switch(model: str, label: str, md: int = 6) -> dict:
+    return form_col({"component": "VSwitch",
+                     "props": {"model": model, "label": label}}, md)
+
+
+def form_select(model: str, label: str, items: Dict[str, str],
+                md: int = 6, **extra: Any) -> dict:
+    """下拉框。`items` 是 `{值: 显示名}`，顺序即界面顺序。"""
+    props: Dict[str, Any] = {
+        "model": model,
+        "label": label,
+        "items": [{"title": title, "value": value} for value, title in items.items()],
+    }
+    props.update(extra)          # multiple / chips 等透传
+    return form_col({"component": "VSelect", "props": props}, md)
+
+
+def form_text(model: str, label: str, placeholder: str = "", md: int = 6) -> dict:
+    return form_col({"component": "VTextField",
+                     "props": {"model": model, "label": label,
+                               "placeholder": placeholder}}, md)
+
+
+def form_cron(model: str, label: str, placeholder: str = "", md: int = 6) -> dict:
+    return form_col({"component": "VCronField",
+                     "props": {"model": model, "label": label,
+                               "placeholder": placeholder}}, md)
+
+
+def form_textarea(model: str, label: str, placeholder: str = "",
+                  rows: int = 5, md: int = 12) -> dict:
+    return form_col({"component": "VTextarea",
+                     "props": {"model": model, "label": label,
+                               "rows": rows, "placeholder": placeholder}}, md)
+
+
+def form_alert(text: str, type_: str = "info") -> dict:
+    """说明条。注意 `text` 与 `component` 同级（不是放在 props 里）。"""
+    return form_col({"component": "VAlert",
+                     "props": {"type": type_, "variant": "tonal"},
+                     "text": text})
+
+
+# ══════════════════════════════════════════════════════════════════════
 # MoviePilot 插件
 # ══════════════════════════════════════════════════════════════════════
 class NfoGapFill(_PluginBase):  # type: ignore[misc]
     # 插件名称
     plugin_name = "NFO 与图片差异比对"
-    # 插件描述
+    # 插件描述（与 package.v2.json 的 description 保持一致）
     plugin_desc = ("比对本地 NFO 与海报/背景图：缺失补齐、不一致替换、一致跳过；"
-                   "支持字段保护与 NFO 锁定。")
-    # 插件图标
-    plugin_icon = "NfoGapFill.png"
+                   "支持 NFO 锁定与只补缺失。")
+    # 插件图标（绝对 URL —— 写裸文件名会 404，原因见 PLUGIN_ICON 处的注释）
+    plugin_icon = PLUGIN_ICON
     # 插件版本
     plugin_version = PLUGIN_VERSION
     # 插件作者
@@ -3032,298 +3104,155 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
 
     # ── 界面 ───────────────────────────────────────────────────────
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [
-            {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                                {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                                {"component": "VSwitch", "props": {"model": "onlyonce", "label": "保存后立即运行一次"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                                {"component": "VSwitch", "props": {"model": "notify", "label": "完成后发送通知"}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "mode",
-                                    "label": "处理模式",
-                                    "items": [
-                                        {"title": "不一致则替换（缺失补齐 + 不同替换 + 相同跳过）", "value": "sync"},
-                                        {"title": "只补缺失（不动任何已有内容）", "value": "gapfill"},
-                                        {"title": "只报告差异（不写入任何文件）", "value": "report"},
-                                        {"title": "强制全部覆盖（等同官方插件 force_all，慎用）", "value": "force"},
-                                    ]}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VCronField", "props": {
-                                    "model": "cron", "label": "执行周期",
-                                    "placeholder": "留空 = 每周日凌晨 3 点跑一次；也可填 5 位 cron，如 0 3 * * *"}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {
-                                    "model": "tmdb_api_key",
-                                    "label": "TMDB API Key（留空 = 沿用 MoviePilot 里配置的 Key）",
-                                    "placeholder": "通常留空即可"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "language", "label": "元数据语言（同时决定优先取哪种语言的图片）",
-                                    "items": [
-                                        {"title": "简体中文", "value": "zh-CN"},
-                                        {"title": "繁體中文", "value": "zh-TW"},
-                                        {"title": "English", "value": "en-US"},
-                                        {"title": "日本語", "value": "ja-JP"},
-                                    ]}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "concurrency",
-                                    "label": "并发数（加快比对速度）",
-                                    "items": [
-                                        {"title": "1 — 顺序执行（最省资源）", "value": "1"},
-                                        {"title": "4 — 推荐（默认）", "value": "4"},
-                                        {"title": "6", "value": "6"},
-                                        {"title": "8 — 网络很好时可以试", "value": "8"},
-                                    ]}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "开销集中在网络等待（下载图片、查 TMDB / fanart.tv），"
-                                         "磁盘与 CPU 压力很小 —— 开大基本只有好处。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSwitch", "props": {"model": "dry_run", "label": "演练模式（只记录将要修改的内容，不写盘）"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSwitch", "props": {"model": "respect_lock", "label": "尊重 NFO 内的 lockdata / lockedfields"}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSwitch", "props": {
-                                    "model": "backup", "label": "写入前备份原 NFO / 图片到 .nfo-backup"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "cast_limit",
-                                    "label": "演员写入上限",
-                                    "items": [
-                                        {"title": "10 位（文件更小）", "value": "10"},
-                                        {"title": "20 位（默认）", "value": "20"},
-                                        {"title": "30 位", "value": "30"},
-                                        {"title": "50 位", "value": "50"},
-                                        {"title": "全部（按 TMDB 返回的全写，NFO 会明显变大）", "value": "0"},
-                                    ]}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "image_mode",
-                                    "label": "图片处理",
-                                    "items": [
-                                        {"title": "缺失补齐 + 不一致替换（推荐）", "value": "sync"},
-                                        {"title": "只补缺失图片（不比对、不替换已有图）", "value": "missing"},
-                                        {"title": "完全不处理图片", "value": "off"},
-                                    ]}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "image_quality",
-                                    "label": "图片画质",
-                                    "items": [
-                                        {"title": "标准（海报 w780 / 背景 w1280，省空间）", "value": "standard"},
-                                        {"title": "原始尺寸（最清晰，体积明显更大）", "value": "original"},
-                                    ]}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "image_sources",
-                                    "label": "图片来源优先级",
-                                    "items": [
-                                        {"title": "TMDB 优先，fanart.tv 其次（推荐）", "value": "tmdb,fanart"},
-                                        {"title": "fanart.tv 优先，TMDB 其次", "value": "fanart,tmdb"},
-                                        {"title": "只用 TMDB（不做 fanart 兜底）", "value": "tmdb"},
-                                        {"title": "只用 fanart.tv（不做 TMDB 兜底）", "value": "fanart"},
-                                    ]}}]},
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "同一类图两个源都有时，按这里的顺序取第一个命中的。"
-                                         "注意源本身有差别：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图"
-                                         "**只有 fanart.tv 有** —— 这几类无论顺序如何都只能取 fanart 的。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "所有类型的图片共用一套选图规则：先按「元数据语言」取本语言图，"
-                                         "**按评分（vote_average）从高到低**；本语言一张都没有时"
-                                         "不再限定语言，**从全部候选里按评分从高到低取**。"
-                                         "评分相同时票数多的优先，再相同则取分辨率更大的那张。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "tmdb_image_kinds",
-                                    "label": "TMDB 提供的图片类型（可多选）",
-                                    "multiple": True,
-                                    "chips": True,
-                                    "items": [
-                                        {"title": "海报（poster.jpg）", "value": "poster"},
-                                        {"title": "背景图（backdrop.jpg + fanart.jpg）", "value": "backdrop"},
-                                        {"title": "徽标（logo.png）", "value": "logo"},
-                                        {"title": "剧集缩略图（单集剧照 → 与视频同名的 .jpg）", "value": "thumb"},
-                                    ]}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VSelect", "props": {
-                                    "model": "fanart_image_kinds",
-                                    "label": "fanart.tv 提供的图片类型（可多选）",
-                                    "multiple": True,
-                                    "chips": True,
-                                    "items": [
-                                        {"title": "横版缩略图（thumb.jpg + landscape.jpg）", "value": "thumb"},
-                                        {"title": "横幅图（banner.jpg）", "value": "banner"},
-                                        {"title": "光盘图（disc.png，仅电影）", "value": "disc"},
-                                        {"title": "透明艺术图（clearart.png）", "value": "clearart"},
-                                        {"title": "横版缩略图别名（landscape.jpg）", "value": "landscape"},
-                                    ]}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "两个下拉各管一个数据源，实际处理的是它们的**并集**。"
-                                         "「缩略图」两边都有：电影 / 剧集 / 季取自 fanart 横版图，"
-                                         "单集取自 TMDB 剧照 —— 勾任意一边即可生效。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "勾选后会写成：海报 → poster.jpg；背景图 → backdrop.jpg + fanart.jpg；"
-                                         "徽标 → logo.png；缩略图 → thumb.jpg + landscape.jpg（单集则用剧照"
-                                         "写成与视频同名的 .jpg）；横幅图 → banner.jpg；"
-                                         "光盘图 → disc.png（仅电影）；透明艺术图 → clearart.png。"
-                                         "季图片与 MP 官方一致，季目录内写通用名，"
-                                         "剧集根目录同时写一份 seasonNN-poster.jpg。"
-                                         "两个下拉都不选 = 不处理任何图片。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 7}, "content": [
-                                {"component": "VTextarea", "props": {
-                                    "model": "paths",
-                                    "label": "媒体库目录（每行一个，行尾可加 #电影 / #电视剧）",
-                                    "rows": 5,
-                                    "placeholder": "/media/link/电影#电影\n"
-                                                   "/media/link/电视剧#电视剧\n"
-                                                   "/media/link/其它    （不加 # 则两种类型都处理）"}}]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 5}, "content": [
-                                {"component": "VTextarea", "props": {
-                                    "model": "exclude_paths",
-                                    "label": "排除路径（每行一个路径片段，命中即跳过）",
-                                    "rows": 5,
-                                    "placeholder": "Extras\nSample\n@eaDir"}}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「媒体库目录」行尾加 #电影 或 #电视剧，可限定该目录只处理对应类型；"
-                                         "不加则两种都处理。别名也认：movie / tv / series。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「排除路径」按路径片段做包含匹配，命中即跳过该目录（如 Extras、"
-                                         "@eaDir、Sample）—— 用来避开剧照集、字幕样板等无关目录。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "「TMDB API Key」留空时会沿用 MoviePilot 里已配置的 Key 与代理，"
-                                         "所以通常什么都不用填。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                                 "text": "NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），"
-                                         "固定取**美国（US）**地区的分级。"
-                                         "若该片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，"
-                                         "不会在 NFO 里留空。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {
-                                    "type": "info", "variant": "tonal"},
-                                 "text": "「不一致则替换」会修正与 TMDB 不同的字段（例如过时的简介、错误的年份）。"
-                                         "若想保住手工润色的内容，可改用「只补缺失」，"
-                                         "这样已有内容一律不动。"}]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
-                                 "text": "建议先用「只报告差异 + 演练模式」跑一轮：运行结束后本页会列出«将要修改哪些文件»，"
-                                         "对着清单确认无误，再切换为「不一致则替换」正式执行。"}]},
-                        ],
-                    },
-                ],
-            }
-        ], {
+        """设置页。
+
+        内容与顺序即界面上看到的顺序；控件用下面的 form_* 小工厂搭，
+        加一个配置项通常只需要新增一行。
+        """
+        return [{
+            "component": "VForm",
+            "content": [
+                form_row(
+                    form_switch("enabled", "启用插件", md=4),
+                    form_switch("onlyonce", "保存后立即运行一次", md=4),
+                    form_switch("notify", "完成后发送通知", md=4),
+                ),
+                form_row(
+                    form_select("mode", "处理模式", {
+                        "sync": "不一致则替换（缺失补齐 + 不同替换 + 相同跳过）",
+                        "gapfill": "只补缺失（不动任何已有内容）",
+                        "report": "只报告差异（不写入任何文件）",
+                        "force": "强制全部覆盖（等同官方插件 force_all，慎用）",
+                    }),
+                    form_cron("cron", "执行周期",
+                              "留空 = 每周日凌晨 3 点跑一次；也可填 5 位 cron，如 0 3 * * *"),
+                ),
+                form_row(
+                    form_text("tmdb_api_key",
+                              "TMDB API Key（留空 = 沿用 MoviePilot 里配置的 Key）",
+                              "通常留空即可"),
+                    form_select("language", "元数据语言（同时决定优先取哪种语言的图片）", {
+                        "zh-CN": "简体中文",
+                        "zh-TW": "繁體中文",
+                        "en-US": "English",
+                        "ja-JP": "日本語",
+                    }),
+                ),
+                form_row(
+                    form_select("concurrency", "并发数（加快比对速度）", {
+                        "1": "1 — 顺序执行（最省资源）",
+                        "4": "4 — 推荐（默认）",
+                        "6": "6",
+                        "8": "8 — 网络很好时可以试",
+                    }),
+                ),
+                form_row(form_alert(
+                    "开销集中在网络等待（下载图片、查 TMDB / fanart.tv），"
+                    "磁盘与 CPU 压力很小 —— 开大基本只有好处。")),
+                form_row(
+                    form_switch("dry_run", "演练模式（只记录将要修改的内容，不写盘）"),
+                    form_switch("respect_lock", "尊重 NFO 内的 lockdata / lockedfields"),
+                ),
+                form_row(
+                    form_switch("backup", "写入前备份原 NFO / 图片到 .nfo-backup"),
+                    form_select("cast_limit", "演员写入上限", {
+                        "10": "10 位（文件更小）",
+                        "20": "20 位（默认）",
+                        "30": "30 位",
+                        "50": "50 位",
+                        "0": "全部（按 TMDB 返回的全写，NFO 会明显变大）",
+                    }),
+                ),
+                form_row(
+                    form_select("image_mode", "图片处理", {
+                        "sync": "缺失补齐 + 不一致替换（推荐）",
+                        "missing": "只补缺失图片（不比对、不替换已有图）",
+                        "off": "完全不处理图片",
+                    }),
+                    form_select("image_quality", "图片画质", {
+                        "standard": "标准（海报 w780 / 背景 w1280，省空间）",
+                        "original": "原始尺寸（最清晰，体积明显更大）",
+                    }),
+                ),
+                form_row(
+                    form_select("image_sources", "图片来源优先级", {
+                        "tmdb,fanart": "TMDB 优先，fanart.tv 其次（推荐）",
+                        "fanart,tmdb": "fanart.tv 优先，TMDB 其次",
+                        "tmdb": "只用 TMDB（不做 fanart 兜底）",
+                        "fanart": "只用 fanart.tv（不做 TMDB 兜底）",
+                    }, md=12),
+                    form_alert(
+                        "同一类图两个源都有时，按这里的顺序取第一个命中的。"
+                        "注意源本身有差别：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图"
+                        "**只有 fanart.tv 有** —— 这几类无论顺序如何都只能取 fanart 的。"),
+                ),
+                form_row(form_alert(
+                    "所有类型的图片共用一套选图规则：先按「元数据语言」取本语言图，"
+                    "**按评分（vote_average）从高到低**；本语言一张都没有时"
+                    "不再限定语言，**从全部候选里按评分从高到低取**。"
+                    "评分相同时票数多的优先，再相同则取分辨率更大的那张。")),
+                form_row(
+                    form_select("tmdb_image_kinds", "TMDB 提供的图片类型（可多选）", {
+                        "poster": "海报（poster.jpg）",
+                        "backdrop": "背景图（backdrop.jpg + fanart.jpg）",
+                        "logo": "徽标（logo.png）",
+                        "thumb": "剧集缩略图（单集剧照 → 与视频同名的 .jpg）",
+                    }, multiple=True, chips=True),
+                    form_select("fanart_image_kinds", "fanart.tv 提供的图片类型（可多选）", {
+                        "thumb": "横版缩略图（thumb.jpg + landscape.jpg）",
+                        "banner": "横幅图（banner.jpg）",
+                        "disc": "光盘图（disc.png，仅电影）",
+                        "clearart": "透明艺术图（clearart.png）",
+                        "landscape": "横版缩略图别名（landscape.jpg）",
+                    }, multiple=True, chips=True),
+                ),
+                form_row(form_alert(
+                    "两个下拉各管一个数据源，实际处理的是它们的**并集**。"
+                    "「缩略图」两边都有：电影 / 剧集 / 季取自 fanart 横版图，"
+                    "单集取自 TMDB 剧照 —— 勾任意一边即可生效。")),
+                form_row(form_alert(
+                    "勾选后会写成：海报 → poster.jpg；背景图 → backdrop.jpg + fanart.jpg；"
+                    "徽标 → logo.png；缩略图 → thumb.jpg + landscape.jpg（单集则用剧照"
+                    "写成与视频同名的 .jpg）；横幅图 → banner.jpg；"
+                    "光盘图 → disc.png（仅电影）；透明艺术图 → clearart.png。"
+                    "季图片与 MP 官方一致，季目录内写通用名，"
+                    "剧集根目录同时写一份 seasonNN-poster.jpg。"
+                    "两个下拉都不选 = 不处理任何图片。")),
+                form_row(
+                    form_textarea("paths",
+                                  "媒体库目录（每行一个，行尾可加 #电影 / #电视剧）",
+                                  "/media/link/电影#电影\n"
+                                  "/media/link/电视剧#电视剧\n"
+                                  "/media/link/其它    （不加 # 则两种类型都处理）",
+                                  rows=5, md=7),
+                    form_textarea("exclude_paths",
+                                  "排除路径（每行一个路径片段，命中即跳过）",
+                                  "Extras\nSample\n@eaDir",
+                                  rows=5, md=5),
+                ),
+                form_row(form_alert(
+                    "「媒体库目录」行尾加 #电影 或 #电视剧，可限定该目录只处理对应类型；"
+                    "不加则两种都处理。别名也认：movie / tv / series。")),
+                form_row(form_alert(
+                    "「排除路径」按路径片段做包含匹配，命中即跳过该目录（如 Extras、"
+                    "@eaDir、Sample）—— 用来避开剧照集、字幕样板等无关目录。")),
+                form_row(form_alert(
+                    "「TMDB API Key」留空时会沿用 MoviePilot 里已配置的 Key 与代理，"
+                    "所以通常什么都不用填。")),
+                form_row(form_alert(
+                    "NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），"
+                    "固定取**美国（US）**地区的分级。"
+                    "若该片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，"
+                    "不会在 NFO 里留空。")),
+                form_row(form_alert(
+                    "「不一致则替换」会修正与 TMDB 不同的字段（例如过时的简介、错误的年份）。"
+                    "若想保住手工润色的内容，可改用「只补缺失」，"
+                    "这样已有内容一律不动。")),
+                form_row(form_alert(
+                    "建议先用「只报告差异 + 演练模式」跑一轮：运行结束后本页会列出«将要修改哪些文件»，"
+                    "对着清单确认无误，再切换为「不一致则替换」正式执行。", type_="warning")),
+            ],
+        }], {
             "enabled": False,
             "onlyonce": False,
             "notify": True,
