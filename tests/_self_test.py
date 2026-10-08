@@ -330,6 +330,44 @@ check("两者的变更明细条数与内容一致（没有串行化错误）",
 check("日志里明确写出了并发数", "并发 4" in par_out)
 check("顺序执行时不打印并发字样", "并发" not in seq_out)
 
+# ── 回归：并发写同一路径不再因临时文件重名而失败 ──────────────────────
+# 线上真实报错：[Errno 2] No such file or directory: 'xxx/fanart.jpg.nfgpart' -> '.../fanart.jpg'
+# 成因：多个 worker 同时写同一目标，旧的固定临时名 xxx.nfgpart 被互相踩。
+# 这里直接用线程池并发调 write_image_bytes 同一路径，验证不再抛错、内容正确、无残留。
+import concurrent.futures as _cf
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location("_nfg_race_mod", TOOL)
+_race_module = _ilu.module_from_spec(_spec)
+sys.modules["_nfg_race_mod"] = _race_module
+_spec.loader.exec_module(_race_module)
+
+_race_dir = FIX / "并发写入测试"
+_race_dir.mkdir(parents=True, exist_ok=True)
+_race_path = _race_dir / "fanart.jpg"
+_payload = b"\xff\xd8\xff\xe0" + b"NFGAPFILL-RACE" * 500     # 伪装成 jpg 的一坨字节
+
+
+def _race_write(_i):
+    _race_module.write_image_bytes(_race_path, _payload, None, _race_dir)
+
+
+_errs = []
+with _cf.ThreadPoolExecutor(max_workers=8) as _pool:
+    for _f in [_pool.submit(_race_write, i) for i in range(8)]:
+        try:
+            _f.result()
+        except Exception as _exc:
+            _errs.append(repr(_exc))
+
+check("并发写同一图片路径 8 次不报错（临时文件已唯一化）", not _errs, str(_errs[:2]))
+check("并发写入后内容正确且完整",
+      _race_path.exists() and _race_path.read_bytes() == _payload,
+      f"size={_race_path.stat().st_size if _race_path.exists() else 'missing'}")
+check("并发写入后没有残留 .nfgpart 临时文件",
+      not list(_race_dir.glob("*.nfgpart")),
+      str([p.name for p in _race_dir.iterdir()]))
+
 print()
 print("=" * 70)
 reset_fixture()   # 复原样例库：保证可重复运行，并清掉 .nfo-backup 残留
