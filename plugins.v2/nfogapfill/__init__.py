@@ -192,7 +192,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.8.6"
+PLUGIN_VERSION = "1.8.7"
 # 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
 #
 # 三条约束（都踩过坑，别改回去）：
@@ -2837,8 +2837,12 @@ class Engine:
                     continue
                 if spec.kind in no_image:
                     # 在线这一类型确实一张图都没有。**明确标注、绝不回退。**
-                    logger.info(f"{rel}：在线没有「{spec.kind}」这类图片，"
-                                f"未写入 {path.name}")
+                    #
+                    # 记 debug 而不是 info：老剧 / 冷门片的**每一集**通常都没有剧照，
+                    # 一部几十集的剧会在日志里刷出几十行同样的话，把真正要看的
+                    # 「已更新 …」冲掉。信息不丢 —— 报告里仍然逐条列出
+                    # （见下面的 __image_change），只是不再占 INFO 版面。
+                    logger.debug(f"{rel}：它对应的{spec.kind}在线没有，未写入 {path.name}")
                     self.__image_change(rel, "未比对", "跳过（在线无此图）", label,
                                         "在线该类型无图", "")
                 continue
