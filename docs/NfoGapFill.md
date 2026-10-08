@@ -422,19 +422,26 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ## 自测
 
-无需联网、无需 TMDB Key，纯标准库：
+> 仓库内**不再附带测试代码**。v1.7.8 及之前版本曾提供 269 项离线断言
+> （`tests/_self_test.py` + `tests/_self_test_plugin.py`，不联网、不需TMDB Key），
+> 已随仓库精简一并移除。
+
+改动插件后想验证行为，建议用插件自带的 **CLI 演练模式**（`--source file` 离线跑，
+不写盘只出报告）：
 
 ```bash
-python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季图双落点）
-python tests/_self_test_plugin.py   # 插件面 240 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试与域名覆盖/图片备用源/来源优先级/图片类型双下拉与并集/MP 图片类型与命名对齐）
+python plugins.v2/nfogapfill/__init__.py --source file --root 你的媒体库 --report
 ```
 
-覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
+先用 `report` 模式看判定结果，确认无误再用 `sync` 模式实际写入。
+
+那套断言曾覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
 二次运行幂等（零写入）、保护字段生效、`gapfill` 模式不替换、表单控件与默认配置一一对应、端到端出报告并发通知；
 图片部分另外覆盖：缺失补齐、`fanart` 别名同内容、季图两处都写（季目录通用名 + 剧集根目录 seasonNN 副本）、单集缩略图命名、
 指纹匹配零下载幂等、错图被替换且原图入备份、`image_mode=missing/off` 行为、
 `lockdata` 连图片一起锁、TMDB 选图策略（只按语言、同级取第一条）、尺寸档位按类型区分、
 与 MP 官方的类型集合/文件名逐项对齐（剧集不写 disc、thumb 与 landscape 成对、季图双落点、特别篇 season-specials-poster）。
+这些行为约定仍然有效，文档各处描述的就是它们。
 
 ---
 
@@ -462,16 +469,14 @@ python tests/_self_test_plugin.py   # 插件面 240 项断言（伪造 MP 宿主
 仓库整体结构见 [README 的「目录结构」一节](../README.md#目录结构)。本插件自身涉及的文件：
 
 ```
-plugins.v2/nfogapfill/__init__.py    # 插件本体（类名 NfoGapFill）
+plugins.v2/nfogapfill/__init__.py    # 插件本体（类名 NfoGapFill）—— MoviePilot 只下载这一个文件
 icons/nfogapfill.png                 # 图标
 docs/DEPLOY.md                       # 部署与排错详解
-tests/_self_test.py / _self_test_plugin.py / _fixture/
-├── 媒体库/                          # 样例媒体库（NFO）
-├── images/                          # 样例在线图片（离线测图片用）
-└── remote_cache.json                # 模拟在线元数据 + 图片地址
 ```
 
 > MoviePilot 约定：**类名 = 插件 ID**（`NfoGapFill`），**目录名 = 类名小写**（`nfogapfill`），入口固定为 `__init__.py`。
+> 安装时 MP 只会拉取 `plugins.v2/nfogapfill/` 目录下的文件，`docs/` 与 `icons/` 不参与安装
+> （图标是 `package.v2.json` 里通过 CDN 链接引用的）。
 
 ---
 

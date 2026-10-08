@@ -12,9 +12,6 @@ dist/
 *.egg-info/
 
 # 测试 / 运行时产物
-tests/_fixture/_run/
-tests/_fixture/**/.nfo-backup/
-tests/_fixture/e2e/
 .pytest_cache/
 .coverage
 htmlcov/

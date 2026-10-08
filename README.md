@@ -42,16 +42,12 @@
 MoviePilot-Plugins/
 ├── package.v2.json                  # 插件市场索引
 ├── plugins.v2/
-│   └── nfogapfill/__init__.py       # 单文件插件
+│   └── nfogapfill/__init__.py       # 插件本体（MoviePilot 只下载这一个文件）
 ├── icons/nfogapfill.png             # 插件图标（package.v2.json 里走 jsDelivr CDN）
 ├── docs/                            # 文档
 │   ├── NfoGapFill.md
 │   └── DEPLOY.md
-├── scripts/
-│   ├── build_preview.py
-│   └── fetch_real_samples.py
-├── tests/                           # 离线测试（不连 MoviePilot，伪造宿主 app 包）
-│   ├── _self_test.py / _self_test_plugin.py / _fixture/
+├── create_release.sh                  # 发版脚本（打 zip + 建 Release + 上传附件）
 └── RELEASE_v1.7.8.md / RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
 ```
 
@@ -61,11 +57,13 @@ MoviePilot-Plugins/
 - 插件入口固定为 `__init__.py`；若拆成多文件，MoviePilot 安装时会**递归下载整个插件目录**，
   同目录的辅助模块会一并安装，无需打包成单文件
 - 图标走 jsDelivr CDN（`raw.githubusercontent.com` 在国内常被挡，CDN 一般可直连）
+- MoviePilot 安装插件时只拉取 `plugins.v2/{插件ID}/` 下的文件，
+  仓库里的 `docs/` `icons/` 都不参与安装
 
-离线测试：
+发版：
 
 ```bash
-python tests/_self_test_plugin.py       # 269 项
+GH_TOKEN=你的PAT bash create_release.sh          # 自动取 PLUGIN_VERSION
 ```
 
 ---
