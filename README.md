@@ -2,7 +2,7 @@
 
 > 比对本地 NFO 与在线元数据、海报/背景图：**缺失补齐、不一致替换、一致跳过**。
 
-![version](https://img.shields.io/badge/version-1.7.6-blue)
+![version](https://img.shields.io/badge/version-1.7.7-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -404,7 +404,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季图双落点）
-python tests/_self_test_plugin.py   # 插件面 202 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试/MP 图片类型与命名对齐）
+python tests/_self_test_plugin.py   # 插件面 213 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试与域名覆盖/图片备用源/MP 图片类型与命名对齐）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
@@ -510,9 +510,18 @@ v1.4.3 起会主动识别并清除这类脏值 —— 只要某个字段里存�
   （`MediaInfo.poster_path` / `backdrop_path`），徽标 / 缩略图 / 季图片拿不到。
 - **首轮图片有流量开销**：库里已有图片需要下载后才能判定是否一致；之后靠指纹清单零下载。
   库特别大时，可以先把「媒体库目录」填成某个子目录分批跑，或先设 `image_mode=missing` 只补空缺。
-- **图片下载依赖 `image.tmdb.org`**：国内直连经常超时。插件会自动沿用 MoviePilot 的
-  `PROXY_HOST`（代理）与 `TMDB_IMAGE_DOMAIN`（图片域名可换成镜像/反代），
-  下载失败还会**自动重试 3 次**；仍失败的条目会列在详情页的失败清单里，下次运行自动重试。
+- **图片下载依赖 `image.tmdb.org`**：国内直连经常超时，甚至整段被拦（`SSL: UNEXPECTED_EOF_WHILE_READING`）。
+  插件会自动沿用 MoviePilot 的 `PROXY_HOST`（代理）与 `TMDB_IMAGE_DOMAIN`（图片域名可换成镜像/反代）；
+  官方域名连不上时还会**自动改试 TMDB 官方 CDN 裸域名**（同一份对象），每个地址各重试 3 次；
+  仍失败的条目会列在详情页的失败清单里，下次运行自动重试。
+  > 自定义了 `TMDB_IMAGE_DOMAIN` 时以你的镜像为准，插件不会再偷偷换源。
+- **TMDB 接口域名也可覆盖**：接口地址默认 `api.themoviedb.org`，但它在部分地区会被网关整段拦掉
+  （`Tunnel connection failed: 502`），而等价域名 `api.tmdb.org` 仍可达、返回内容一致。
+  可在 MoviePilot 设置里加 `TMDB_API_DOMAIN=api.tmdb.org`，或给本插件进程设同名环境变量；
+  只填域名会自动补 `/3`。**这是「图片能下、数据取不到」矛盾的根因。**
+- **fanart.tv Key 三级回退**：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图来自 fanart.tv，Key 按
+  「宿主设置 `FANART_API_KEY` → 环境变量 `FANART_API_KEY` → MP 内置默认 Key」逐级取用。
+  以前只读宿主设置，命令行 / docker 用环境变量传 Key 会失效。
 - **写回后仍需让媒体服务器刷新**（MP 的「媒体库服务器刷新」插件，或在 Emby/Jellyfin 手动「刷新元数据」）。
 - **硬链接做种库**请确认 `PUID/PGID/UMASK` 对媒体目录可写，否则会静默失败。
 - 与官方「媒体库刮削」建议**二选一**：本插件已覆盖 NFO 与图片，同时开启两边可能互相覆盖。

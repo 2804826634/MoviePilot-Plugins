@@ -6,6 +6,7 @@
     python _self_test_plugin.py
 """
 import importlib.util
+import inspect as _inspect
 import json
 import os
 import shutil
@@ -415,6 +416,28 @@ finally:
 check("恢复后默认仍是官方域名",
       module.image_host() == "https://image.tmdb.org/t/p/")
 
+# TMDB 接口域名：默认官方，可被宿主设置覆盖（api.themoviedb.org 被整段拦掉时的逃生口）
+try:
+    module.mp_setting = lambda name, default=None: (
+        {"TMDB_API_DOMAIN": "api.tmdb.org"}.get(name, default))
+    check("tmdb_api_host 跟随宿主的 TMDB_API_DOMAIN（补 /3）",
+          module.tmdb_api_host() == "https://api.tmdb.org/3", module.tmdb_api_host())
+    module.mp_setting = lambda name, default=None: (
+        {"TMDB_API_DOMAIN": "https://api.tmdb.org/3"}.get(name, default))
+    check("填了完整 URL/已带 /3 时不重复拼接",
+          module.tmdb_api_host() == "https://api.tmdb.org/3", module.tmdb_api_host())
+    module.mp_setting = lambda name, default=None: (
+        {"TMDB_API_DOMAIN": "  "}.get(name, default))
+    check("宿主没配（空白值）时回落官方接口域名",
+          module.tmdb_api_host() == "https://api.themoviedb.org/3", module.tmdb_api_host())
+finally:
+    module.mp_setting = _orig_mp_setting
+check("恢复后默认仍是官方接口域名",
+      module.tmdb_api_host() == "https://api.themoviedb.org/3")
+check("TmdbProvider 实例真的用上了 api_host",
+      "self.api_host" in _inspect.getsource(module.TmdbProvider._get),
+      "fetch 里仍硬编码 api.themoviedb.org")
+
 
 class _FakeResponse:
     def __init__(self, data):
@@ -456,6 +479,59 @@ check("重试全部失败才返回 None，并且尝试了设定的次数",
 empty = FlakyOpener(0, payload=b"")
 check("响应为空也算失败（不会写出 0 字节图片）",
       module.download_bytes("https://x/y.png", empty, attempts=1) is None)
+
+# 官方图片域名被整段拦掉时，必须自动改走 CDN 备用源（否则「图选得出来、下不下来」）
+check("官方图片地址会追加 CDN 备用源",
+      module.image_url_candidates("https://image.tmdb.org/t/p/original/a.jpg")
+      == ["https://image.tmdb.org/t/p/original/a.jpg",
+          "https://tmdb-image-prod.b-cdn.net/t/p/original/a.jpg"],
+      str(module.image_url_candidates("https://image.tmdb.org/t/p/original/a.jpg")))
+check("非官方地址（fanart / 自定义镜像）不追加备用源",
+      module.image_url_candidates("https://assets.fanart.tv/fanart/x.jpg")
+      == ["https://assets.fanart.tv/fanart/x.jpg"])
+
+
+class FirstHostDead:
+    """第一个源全挂、备用源能通 —— 模拟 image.tmdb.org 被拦而 CDN 可用。"""
+
+    def __init__(self):
+        self.hosts = []
+
+    def open(self, request, timeout=None):
+        host = request.full_url.split("/")[2]
+        self.hosts.append(host)
+        if host == "image.tmdb.org":
+            raise OSError("[SSL: UNEXPECTED_EOF_WHILE_READING]")
+        return _FakeResponse(b"cdn-bytes")
+
+
+dead_host = FirstHostDead()
+check("官方域名连不上时自动换 CDN 源并成功",
+      module.download_bytes("https://image.tmdb.org/t/p/original/a.jpg",
+                            dead_host, attempts=1) == b"cdn-bytes"
+      and "tmdb-image-prod.b-cdn.net" in dead_host.hosts,
+      f"hosts={dead_host.hosts}")
+
+# fanart Key：宿主没配时应回落 MP 内置默认值 / 环境变量，而不是直接判「没 Key」
+_orig_env = os.environ.get("FANART_API_KEY")
+try:
+    os.environ.pop("FANART_API_KEY", None)
+    check("宿主没配 fanart key 时回落到 MP 内置默认值",
+          module.fanart_api_key() == module.FANART_DEFAULT_KEY,
+          module.fanart_api_key())
+    os.environ["FANART_API_KEY"] = "env-key-123"
+    check("宿主没配但环境变量有 fanart key 时用环境变量",
+          module.fanart_api_key() == "env-key-123", module.fanart_api_key())
+    module.mp_setting = lambda name, default=None: (
+        {"FANART_API_KEY": "host-key-999"}.get(name, default))
+    check("宿主配了 fanart key 时宿主优先",
+          module.fanart_api_key() == "host-key-999", module.fanart_api_key())
+finally:
+    module.mp_setting = _orig_mp_setting
+    if _orig_env is None:
+        os.environ.pop("FANART_API_KEY", None)
+    else:
+        os.environ["FANART_API_KEY"] = _orig_env
 
 print()
 print("=" * 70)
@@ -1230,7 +1306,6 @@ check("季专用 fanart 键与 MP 的 seasonposter/seasonbanner/seasonthumb 对�
       and module.FANART_SEASON_KEYS["thumb"] == ("seasonthumb",))
 
 # 单集的缩略图必须是「这一集的剧照」(TMDB stills)，不能被根目录那套 fanart 逻辑顶掉
-import inspect as _inspect
 _fetch_src = _inspect.getsource(module.TmdbProvider.fetch_images)
 check("单集缩略图仍取 TMDB 的 stills（该集剧照）",
       'stills' in _fetch_src and 'episodedetails' in _fetch_src,

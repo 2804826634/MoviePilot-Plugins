@@ -14,9 +14,13 @@ dist/
 # 测试 / 运行时产物
 tests/_fixture/_run/
 tests/_fixture/**/.nfo-backup/
+tests/_fixture/e2e/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# 发版打包产物
+nfogapfill_v*.zip
 
 # 本工具在媒体库根目录生成的东西
 .nfo-backup/
@@ -29,3 +33,7 @@ htmlcov/
 Thumbs.db
 desktop.ini
 *.swp
+
+# 离线复核样本（真实刮削产物，体积大，不入库）
+samples_e2e/
+samples_preview/

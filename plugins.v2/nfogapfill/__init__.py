@@ -185,7 +185,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.7.6"
+PLUGIN_VERSION = "1.7.7"
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
@@ -351,29 +351,81 @@ def image_host() -> str:
     return f"https://{domain}/t/p/"
 
 
-def download_bytes(url: str, opener: Any = None, attempts: int = 3) -> Optional[bytes]:
-    """下载二进制内容，失败自动重试。
+def tmdb_api_host() -> str:
+    """TMDB **接口**地址前缀，默认 `https://api.themoviedb.org/3`，可被覆盖。
 
-    image.tmdb.org 在部分地区经常抽风，一次失败就把错误写到面板上会制造大量「假失败」。
-    这里做多次尝试 + 递增退避，只有全部失败才返回 None 并记录一条告警。
+    为什么需要这个开关：`api.themoviedb.org` 在部分地区会被 DNS/网关层面直接拦掉
+    （表现为 `Tunnel connection failed: 502` 或连接超时），而同一个服务的备用域名
+    `api.tmdb.org` 往往仍然可达，返回内容与官方完全一致。图片域名早就跟着宿主的
+    `TMDB_IMAGE_DOMAIN` 走了，接口域名却一直是硬编码的 —— 于是「图片能下、数据取不到」
+    这种自相矛盾的状态就会出现在日志里。
+
+    覆盖优先级：宿主设置 `TMDB_API_DOMAIN` > 环境变量 `TMDB_API_DOMAIN` > 默认值。
+    两种写法都兼容：只给域名（`api.tmdb.org`）→ 补上 `/3`；已带 `/3` 或完整 URL → 不重复拼。
     """
+    raw = (str(mp_setting("TMDB_API_DOMAIN", "") or "").strip()
+           or str(os.environ.get("TMDB_API_DOMAIN", "") or "").strip()
+           or "api.themoviedb.org")
+    raw = re.sub(r"^https?://", "", raw).strip("/")
+    if raw.endswith("/3"):
+        return f"https://{raw}"
+    return f"https://{raw}/3"
+
+
+# TMDB 图片的备用源。image.tmdb.org 在国内经常整段被拦（SSL 握手直接断），
+# 但 TMDB 官方 CDN 的裸域名往往还能直连，返回的是同一份对象（路径完全一致）。
+# 只在用户没自定义 TMDB_IMAGE_DOMAIN 时才启用回退 —— 自定义了就以用户为准，别乱换。
+TMDB_IMAGE_FALLBACKS: Tuple[str, ...] = (
+    "https://tmdb-image-prod.b-cdn.net/t/p/",
+)
+
+
+def image_url_candidates(url: str) -> List[str]:
+    """给一个 TMDB 图片 URL 列出「值得试的候选地址」，顺序即优先级。
+
+    命中官方域名（image.tmdb.org）时追加 CDN 裸域名等价地址；
+    用户自定义了镜像 / 是 fanart.tv 的地址 → 原样返回，不做替换。
+    """
+    candidates = [url]
+    if not str(mp_setting("TMDB_IMAGE_DOMAIN", "") or "").strip():
+        for base in TMDB_IMAGE_FALLBACKS:
+            if "image.tmdb.org/t/p/" in url:
+                candidates.append(url.replace("https://image.tmdb.org/t/p/", base)
+                                  .replace("http://image.tmdb.org/t/p/", base))
+    return list(dict.fromkeys(candidates))      # 去重且保序
+
+
+def download_bytes(url: str, opener: Any = None, attempts: int = 3) -> Optional[bytes]:
+    """下载二进制内容，失败自动重试，并**在官方图片域名被拦时自动换备用源**。
+
+    image.tmdb.org 在部分地区经常抽风（甚至整段 SSL 被断），一次失败就把错误写到
+    面板上会制造大量「假失败」。这里做两件事：
+
+    1. 同一地址最多试 `attempts` 次（递增退避）；
+    2. 若地址属于 TMDB 官方图片域名，会按 `image_url_candidates()` 追加 CDN 备用源，
+       每个候选也各试一遍 —— 这样「图能选出来但下不下来」的条目就自愈了。
+    """
+    candidates = image_url_candidates(url)
     last_error = "响应为空"
-    for attempt in range(1, attempts + 1):
-        request = urllib.request.Request(url, headers={"User-Agent": UA})
-        try:
-            if opener is not None:
-                with opener.open(request, timeout=TIMEOUT) as response:
-                    data = response.read()
-            else:
-                with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-                    data = response.read()
-            if data:
-                return data
-        except Exception as exc:
-            last_error = str(exc)
-        if attempt < attempts:
-            time.sleep(0.6 * attempt)
-    logger.warning(f"图片下载失败（已重试 {attempts} 次）：{url}（{last_error}）")
+    for candidate in candidates:
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(candidate, headers={"User-Agent": UA})
+            try:
+                if opener is not None:
+                    with opener.open(request, timeout=TIMEOUT) as response:
+                        data = response.read()
+                else:
+                    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                        data = response.read()
+                if data:
+                    if candidate != url:
+                        logger.debug(f"图片改用备用源下载成功：{candidate}")
+                    return data
+            except Exception as exc:
+                last_error = str(exc)
+            if attempt < attempts:
+                time.sleep(0.6 * attempt)
+    logger.warning(f"图片下载失败（已重试 {attempts} 次 × {len(candidates)} 个源）：{url}（{last_error}）")
     return None
 
 
@@ -421,9 +473,22 @@ FANART_SEASON_KEYS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+# MoviePilot 自带的 fanart.tv 公共 Key（app/core/config.py 的默认值）。
+# 用户没配时直接沿用，省得为了几张横幅图还要自己去申请 —— 与 MP 自身的默认行为一致。
+FANART_DEFAULT_KEY = "d2d31f9ecabea050fc7d68aa3146015f"
+
+
 def fanart_api_key() -> str:
-    """fanart.tv 的 API Key，自动沿用 MoviePilot 的 FANART_API_KEY（MP 自带默认值）。"""
-    return str(mp_setting("FANART_API_KEY", "") or "").strip()
+    """fanart.tv 的 API Key，自动沿用 MoviePilot 的 FANART_API_KEY。
+
+    覆盖优先级：宿主设置 > 环境变量 `FANART_API_KEY` > MP 内置默认 Key。
+    以前只读宿主设置，于是「命令行 / docker 里用环境变量传 key」和「用户啥都没配但
+    其实 MP 自带了一个可用默认值」这两种情况都会误判成「没 Key，跳过横幅图」。
+    """
+    key = str(mp_setting("FANART_API_KEY", "") or "").strip()
+    if not key:
+        key = str(os.environ.get("FANART_API_KEY", "") or "").strip()
+    return key or FANART_DEFAULT_KEY
 
 
 def fanart_lang_order() -> List[str]:
@@ -1240,6 +1305,8 @@ class TmdbProvider:
         self.image_quality = image_quality if image_quality in IMG_SIZES else "standard"
         # 图片域名跟随宿主配置（国内直连 image.tmdb.org 经常超时，MP 允许换镜像）
         self.img_host = image_host()
+        # 接口域名同理可覆盖（默认 api.themoviedb.org；被拦时可换 api.tmdb.org）
+        self.api_host = tmdb_api_host()
         # 光盘图 / 横幅图 / 透明艺术图 / 横版缩略图来自 fanart.tv，Key 自动沿用宿主配置
         self.fanart_key = fanart_api_key()
         handlers = []
@@ -1259,9 +1326,12 @@ class TmdbProvider:
         以前一次失败就放弃，于是条目被记成「取不到在线数据，保持原样」。
         现在对这类瞬时错误重试 TMDB_RETRIES 次（递增退避），
         但 404（资源不存在）不重试，401（Key 无效）直接抛错。
+
+        接口域名走 `tmdb_api_host()`：默认 api.themoviedb.org，
+        被网关整段拦掉时可在宿主设置里把 `TMDB_API_DOMAIN` 换成 api.tmdb.org。
         """
         params.update({"api_key": self.api_key, "language": self.language})
-        url = f"https://api.themoviedb.org/3{path}?{urllib.parse.urlencode(params)}"
+        url = f"{self.api_host}{path}?{urllib.parse.urlencode(params)}"
         last_error = ""
         for attempt in range(1, TMDB_RETRIES + 1):
             self.limiter.wait()          # 每次尝试都走限速，重试不会突破速率上限
