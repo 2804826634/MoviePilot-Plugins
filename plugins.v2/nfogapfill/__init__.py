@@ -91,6 +91,16 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
       （v1.8.0 曾以票数为唯一依据，实测会选中「票多但差评多」的图；
         v1.8.2 改为评分优先，v1.8.3 再补上分辨率兜底。）
 
+    ★ v1.10.0 中文「简体 / 繁体」分档（只影响中文，其它语言仍是上面两档）：
+        TMDB 的 `/images` 响应里所有中文图都标 iso_639_1=zh，**分不出简繁**；
+        但请求参数支持 zh-CN / zh-TW，且实测两组**互不重叠**
+        （tv 94664：简体海报 4 张 + 繁体 12 张 = 并集 16 张）。
+        所以元数据语言是中文时，除了请求并集（`zh`），再按主变体多请求一次：
+        简体（zh-CN）→ 主 zh-CN、次 zh-TW；繁体（zh-TW/zh-HK）→ 主 zh-TW、次 zh-CN。
+        选图变成三档：**主变体 → 次变体 → 本语言（裸 zh）→ 不限语言**，
+        即「简体设置优先简体图，没有简体才用繁体兜底」，反之亦然。
+        背景图若走 web（默认跟随官网顺序），仍然不受语言影响。
+
 ────────────────────────────────────────────────────────────────────────
 五、与 MoviePilot 的配置联动（全部自动继承，不用手填）
     TMDB API Key 自动读取 MoviePilot 里配置的 TMDB_API_KEY；
@@ -200,7 +210,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.9.3"
+PLUGIN_VERSION = "1.10.0"
 # 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
 #
 # 三条约束（都踩过坑，别改回去）：
@@ -316,6 +326,37 @@ BACKDROP_ORDERS: Tuple[str, ...] = (BACKDROP_WEB, BACKDROP_LANGUAGE)
 def normalize_backdrop_order(raw: Any) -> str:
     """背景图选取顺序：web（跟随 TMDB 官网，默认）/ language（本语言优先），非法值回落 web。"""
     return raw if raw in BACKDROP_ORDERS else BACKDROP_WEB
+
+
+# ── 中文图片的「简体 / 繁体」拆分 ───────────────────────────────────────
+# TMDB 的 `/images` 接口有个不对称的地方，必须知道才能做对：
+#   **请求参数**支持 `zh-CN` / `zh-TW` 两种变体，**返回体**里所有中文图的
+#   `iso_639_1` 却一律是 `zh` —— 光看响应分不出简体还是繁体。
+#   实测《无职转生》(tv 94664)：
+#     include_image_language=zh-CN,null → 海报 4 张、徽标 1 张
+#     include_image_language=zh-TW,null → 海报 12 张、徽标 3 张
+#     include_image_language=zh,null    → 海报 16 张（= 4 + 12 的并集）、徽标 4 张
+#   两组之和正好等于并集，说明简体与繁体**互不重叠、各自独立**。
+# 所以「元数据语言是简体就优先简体图、是繁体就优先繁体图」只能靠**分别请求**实现：
+# 先按老办法请求并集（`zh`，顺带保证背景图的官网顺序不变），再额外请求一次
+# **主变体**；「并集 − 主变体 = 次变体」，两组都拿来给 pick_best_image 分档。
+ZH_SIMPLIFIED, ZH_TRADITIONAL = "zh-CN", "zh-TW"
+
+
+def zh_image_variants(locale: Any) -> Optional[Tuple[str, str]]:
+    """元数据语言是中文时返回 `(主变体, 次变体)`，非中文返回 None。
+
+    简体（`zh-CN` / `zh-Hans` / 裸 `zh`）→ 主 `zh-CN`、次 `zh-TW`；
+    繁体（`zh-TW` / `zh-HK` / `zh-MO` / `zh-Hant`）→ 主 `zh-TW`、次 `zh-CN`。
+    主变体优先，主变体一张都没有时才用次变体兜底 —— 这样「简体」设置下
+    遇到了只有繁体图的片子，仍会拿到中文图，而不是掉到外文图上。
+    """
+    low = str(locale or "").strip().lower()
+    if not low.startswith("zh"):
+        return None
+    if low in ("zh-tw", "zh-hk", "zh-mo", "zh-hant"):
+        return (ZH_TRADITIONAL, ZH_SIMPLIFIED)
+    return (ZH_SIMPLIFIED, ZH_TRADITIONAL)
 
 # ── 图片来源优先级 ─────────────────────────────────────────────────────
 # 每类图优先去哪个源取。默认「TMDB 优先、fanart.tv 其次」：
@@ -1344,7 +1385,9 @@ def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root
 
 
 def pick_best_image(entries: List[dict], language: str,
-                    language_free: bool = False) -> Optional[dict]:
+                    language_free: bool = False,
+                    zh_primary: Optional[Any] = None,
+                    zh_secondary: Optional[Any] = None) -> Optional[dict]:
     """从 TMDB 的图片数组里挑一张。
 
     **两种模式**：
@@ -1385,6 +1428,15 @@ def pick_best_image(entries: List[dict], language: str,
       背景图语言无关，官网列表第一张就是官方综合排序里最好的那张；而「本语言
       优先」会把它滤掉、在少量低分本语言图里挑出一张（见文件顶部 BACKDROP_* 注释）。
 
+    ★ `zh_primary` / `zh_secondary` —— **中文的「简体 / 繁体」分档**（v1.10.0 起）。
+      两个参数都是 `file_path` 的集合，由 `_fetch_tmdb_images` 分别请求
+      `zh-CN` / `zh-TW` 后算出来（见文件顶部 ZH_* 注释）：
+        `zh_primary`   = 与元数据语言同变体的中文图（简体选简体、繁体选繁体）；
+        `zh_secondary` = 另一种变体的中文图（主变体一张都没有时才用）。
+      传入后规则变成三档：**主变体 → 次变体 → 本语言（裸 zh）→ 不限语言**，
+      档内仍按同一套评分 / 票数 / 分辨率排序。不传（非中文语言、或该条没有中文图）
+      就完全等价于此前的两档行为。
+
     候选全为空（`entries` 为空、或所有项都没有 `file_path`）→ 返回 None，
     由上层记为该类型缺失、不写文件。
     """
@@ -1395,13 +1447,6 @@ def pick_best_image(entries: List[dict], language: str,
     if language_free:
         # 按 TMDB 原始顺序取第一张 —— 与官网 images 页默认列表顺序一致
         return candidates[0]
-
-    lang = (language or "").split("-")[0].lower()
-
-    same_lang = [item for item in candidates
-                 if lang and (item.get("iso_639_1") or "").lower() == lang]
-    # 第 1 档限本语言；本语言一张都没有时，第 2 档放开到全部候选
-    pool = same_lang or candidates
 
     def average(item: dict) -> float:
         """评分：TMDB 给的是 float 形态（`vote_average: 7.542`），统一成数值比较。"""
@@ -1436,11 +1481,29 @@ def pick_best_image(entries: List[dict], language: str,
         width, height = size(item)
         return (round(average(item), 3), votes(item), width, height)
 
-    best = pool[0]
-    for item in pool:
-        if rank(item) > rank(best):
-            best = item
-    return best
+    def best_of(pool: List[dict]) -> dict:
+        best = pool[0]
+        for item in pool:
+            if rank(item) > rank(best):
+                best = item
+        return best
+
+    # 中文：先按「简体 / 繁体」两组分档 —— 主变体优先，主变体没有才用次变体
+    if zh_primary or zh_secondary:
+        for bucket in (zh_primary, zh_secondary):
+            if not bucket:
+                continue
+            pool = [item for item in candidates if item.get("file_path") in bucket]
+            if pool:
+                return best_of(pool)
+
+    lang = (language or "").split("-")[0].lower()
+
+    same_lang = [item for item in candidates
+                 if lang and (item.get("iso_639_1") or "").lower() == lang]
+    # 第 1 档限本语言；本语言一张都没有时，第 2 档放开到全部候选
+    pool = same_lang or candidates
+    return best_of(pool)
 
 
 def image_size_for(quality: str, kind: str) -> str:
@@ -1788,6 +1851,14 @@ class TmdbProvider:
         data = self._get(path, include_image_language=include)
         if not data:
             return
+        # 中文（v1.10.0 起）：上面请求里的 `zh` 拿的是**简繁并集**，响应又都标 `zh`，
+        # 只靠这一份数据分不出简体 / 繁体。所以再按「主变体」请求一次
+        # （简体语言 → zh-CN，繁体语言 → zh-TW），两组相减即可把简繁拆开。
+        # 并集里一张中文图都没有时直接跳过这次请求（省一次调用）。
+        zh_variant = zh_image_variants(self.language)
+        zh_data: Optional[dict] = None
+        if zh_variant and self._payload_zh_paths(data):
+            zh_data = self._get(path, include_image_language=f"{zh_variant[0]},null") or None
         # 单集的缩略图是「这一集的剧照」，走 TMDB 的 stills（与根目录的横版缩略图不同）
         episode_thumb_key = "stills" if media_type == "episodedetails" else None
         for kind in kinds:
@@ -1798,19 +1869,64 @@ class TmdbProvider:
                 # 电影/剧集/季的 thumb 不在 TMDB 的键里（TMDB 的 stills 是剧照，
                 # 不是横版缩略图），留给 fanart 的 tvthumb / moviethumb
                 continue
-            entries = data.get(api_key) or []
+            entries = list(data.get(api_key) or [])
+            zh_primary: Optional[set] = None
+            zh_secondary: Optional[set] = None
+            if zh_data is not None:
+                zh_primary, zh_secondary = self._split_zh(
+                    entries, zh_data.get(api_key) or [])
             # 只要有候选就一定能选出一张，所以「没选到」只剩一种原因 —— 该类型在线一张图都没有。
             # 请求层已显式枚举常见语言，无需再补探测请求。
             # 背景图：默认直接取 TMDB 原始列表第一张（= 官网 images 页展示顺序，
             # 不做语言过滤、不重排），见 backdrop_order 与文件顶部 BACKDROP_* 注释；
-            # 海报 / 徽标 / 剧照仍走「本语言优先」规则。
+            # 海报 / 徽标 / 剧照仍走「本语言优先」（中文再加「简繁分档」）规则。
             best = pick_best_image(
                 entries, self.language,
-                language_free=(kind == "backdrop" and self.backdrop_order == BACKDROP_WEB))
+                language_free=(kind == "backdrop" and self.backdrop_order == BACKDROP_WEB),
+                zh_primary=zh_primary, zh_secondary=zh_secondary)
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
             else:
                 self.no_image_kinds.add(kind)
+
+    @staticmethod
+    def _payload_zh_paths(payload: dict) -> set:
+        """一份 `/images` 响应里所有中文图的 file_path（响应里它们都标 iso_639_1=zh）。"""
+        paths = set()
+        for value in (payload or {}).values():
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if (isinstance(item, dict)
+                        and (item.get("iso_639_1") or "").lower() == "zh"
+                        and item.get("file_path")):
+                    paths.add(item["file_path"])
+        return paths
+
+    @classmethod
+    def _split_zh(cls, entries: List[dict],
+                  primary_payload: List[dict]) -> Tuple[Optional[set], Optional[set]]:
+        """把中文候选拆成 (主变体, 次变体) 两个 file_path 集合。
+
+        `entries` 是并集（include=zh 的结果），`primary_payload` 是主变体
+        （include=zh-CN 或 zh-TW）的返回。规则：
+          主变体 = primary_payload 里的中文图（不在并集里的会补进 entries，防止漏图）；
+          次变体 = 并集里的中文图 − 主变体（= 另一种变体，实测两组互不重叠）。
+        任一组为空返回 None，调用方按「只剩两档」处理。
+        """
+        primary = {item["file_path"] for item in (primary_payload or [])
+                   if (item.get("iso_639_1") or "").lower() == "zh" and item.get("file_path")}
+        if not primary:
+            return None, None
+        have = {item.get("file_path") for item in entries}
+        for item in (primary_payload or []):
+            if (item.get("file_path") in primary and item.get("file_path") not in have
+                    and (item.get("iso_639_1") or "").lower() == "zh"):
+                entries.append(item)      # 主变体图不在并集里 → 补进来，避免选不到
+                have.add(item["file_path"])
+        union_zh = cls._payload_zh_paths({"x": entries})
+        secondary = union_zh - primary
+        return primary, (secondary or None)
 
     def _fetch_fanart_images(self, tmdb_id: str, media_type: str, season: Optional[str],
                              kinds: Any, out: Dict[str, str]) -> None:
@@ -2116,6 +2232,11 @@ def log_pick_rule(language: str, order: Sequence[str],
     logger.info("图片来源优先级：" + " → ".join(IMAGE_SOURCE_CN.get(s, s) for s in order))
     logger.info("选图规则：海报 / 徽标 / 剧照优先本语言（%s），本语言没有则按评分从全部候选里取"
                 % (language or "?"))
+    zh_variant = zh_image_variants(language)
+    if zh_variant:
+        logger.info("中文图片：%s 优先，主变体一张都没有时才退回 %s"
+                    "（TMDB 的简体 / 繁体是两组互不重叠的图，响应都标 zh，靠分别请求区分）"
+                    % zh_variant)
     if normalize_backdrop_order(backdrop_order) == BACKDROP_WEB:
         logger.info("背景图：直接取 TMDB 官网列表顺序的第一张（不做语言过滤 / 不重排）")
     else:
