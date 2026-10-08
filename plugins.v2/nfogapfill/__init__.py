@@ -200,7 +200,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.9.2"
+PLUGIN_VERSION = "1.9.3"
 # 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
 #
 # 三条约束（都踩过坑，别改回去）：
@@ -3178,8 +3178,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
 
         排版约定（v1.9.2 起）：
           ① 成对的短配置尽量并排（各占 md=6），避免出现「一行只有一个下拉」的孤行；
-          ② 说明条（VAlert）按主题合并，同一主题只留一条，避免整页被大段文字撑长；
-          ③ 顺序固定为「运行 → 图片 → 目录 → 说明」，与使用时的决策顺序一致。
+          ② 并排的两项**宽度必须相等**（一律 md=6，不再用 7:5 这种不对称比例）；
+          ③ 说明条（VAlert）按主题合并，同一主题只留一条，避免整页被大段文字撑长；
+          ④ 顺序固定为「运行 → 图片 → 目录 → 说明」，与使用时的决策顺序一致。
         """
         return [{
             "component": "VForm",
@@ -3272,11 +3273,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                   "/media/link/电影#电影\n"
                                   "/media/link/电视剧#电视剧\n"
                                   "/media/link/其它    （不加 # 则两种类型都处理）",
-                                  rows=5, md=7),
+                                  rows=5, md=6),
                     form_textarea("exclude_paths",
                                   "排除路径（每行一个路径片段，命中即跳过）",
                                   "Extras\nSample\n@eaDir",
-                                  rows=5, md=5),
+                                  rows=5, md=6),
                 ),
                 form_row(form_alert(
                     "「媒体库目录」行尾加 #电影 或 #电视剧，可限定该目录只处理对应类型（不加则两种都处理；"
