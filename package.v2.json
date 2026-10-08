@@ -32,19 +32,5 @@
       "v1.1.0": "新增图片补全：海报/背景图(+fanart 别名)/徽标/剧集缩略图/季海报，与 NFO 共用同一套「一致才跳过」判定，靠指纹清单在稳态零下载；NFO 无 tmdbid 时支持按标题搜索识别",
       "v1.0.0": "首个版本：本地 NFO 与在线元数据差异比对，按需补齐/替换，尊重 lockdata/lockedfields，支持自定义保护字段、演练模式与写入前备份"
     }
-  },
-  "SpecialsFixer": {
-    "name": "整理记录季集修正",
-    "description": "对 TMDB 查无该集的整理记录识别特别篇（SP/OVA/特典），把季/集修正为 Season 00 与正确集号并重新触发 MP 整理流程，刮削仍由 MP 自身完成。",
-    "labels": "文件整理,工具",
-    "version": "1.0.0",
-    "icon": "https://cdn.jsdelivr.net/gh/2804826634/MoviePilot-Plugins@main/icons/specialsfixer.png",
-    "author": "peter_chen",
-    "level": 1,
-    "v3": false,
-    "release": false,
-    "history": {
-      "v1.0.0": "初版：匹配失败判定（区分「确认不存在」与「查不到」）、三重证据特别篇识别（查无该集 + 文件名关键词 + 命中 Season 0 标题）、季/集修正与重新整理触发。**只改整理记录的季/集字段并调用 MP 官方 manual_transfer，不自行刮削、不写媒体元数据**"
-    }
   }
 }
