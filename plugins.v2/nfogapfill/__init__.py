@@ -65,14 +65,18 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
         海报 poster        电影、剧集目录 poster.jpg                ← TMDB
         背景图 backdrop    电影、剧集目录 backdrop.jpg + fanart.jpg  ← TMDB
         徽标 logo          电影、剧集目录 logo.png                  ← TMDB
-        剧集缩略图 thumb   单集剧照，写成与该集视频同名的 .jpg        ← TMDB
+        缩略图 thumb       电影、剧集、季目录 thumb.jpg（横版）      ← fanart.tv
+                           单集为与该集视频同名的 .jpg            ← TMDB 剧照(still)
         横幅图 banner      电影、剧集、季目录 banner.jpg             ← fanart.tv
-        光盘图 disc        电影、剧集目录 disc.png                  ← fanart.tv
+        光盘图 disc        电影目录 disc.png（剧集没有）             ← fanart.tv
         透明艺术图 clearart 电影、剧集目录 clearart.png             ← fanart.tv
         横版缩略图 landscape 电影、剧集、季目录 landscape.jpg        ← fanart.tv
-        季海报             跟随「海报」：**只写季目录 poster.jpg**（一季一图、各归其位）
-                           不回退：该季在线没有海报就跳过并在报告里明确标注，
-                           绝不用剧集海报或别的季的海报顶替
+                           （与 thumb 是同一张图的两个别名，MP 的 IMAGE_ALIASES）
+        季海报             跟随「海报」：季目录 poster.jpg + 剧集根目录 seasonNN-poster.jpg
+                           （双落点，与 MP 一致；不回退，该季在线没图就跳过并标注）
+    注意：**根目录的 thumb / landscape 取自 fanart.tv 的 moviethumb / tvthumb**——
+    这才是「横版缩略图」。TMDB 的 stills 是「剧照」（横竖构图都有），只用于单集缩略图，
+    不再当作根目录的 thumb（早期版本混用过，写出来的 thumb.jpg 常是竖图）。
     fanart.tv 的 API Key 自动沿用 MoviePilot 的 FANART_API_KEY（MP 自带默认值），
     语言偏好跟随 MP 的 FANART_LANG（默认 zh,en）。键名映射与 MP 的 FanartModule 一致。
     一致的判定靠 image_manifest.json 指纹清单：记录「这张图来自哪个 URL、内容 sha256」，
@@ -231,14 +235,19 @@ IMG_SIZES: Dict[str, Dict[str, str]] = {
                  "logo": "original", "thumb": "original"},
 }
 
-# TMDB /images 接口响应里的数组名
+# TMDB /images 接口响应里的数组名。
+# 注意：**根目录的 thumb 不在这里** —— TMDB 的 stills 是「剧照」（横竖构图都有，
+# 多是竖版人物特写），不是 MP 那个「横版缩略图」。电影/剧集/季的 thumb、landscape
+# 一律取自 fanart.tv 的 moviethumb / tvthumb，见 FANART_KEYS。
+# `stills` 只用于**单集**的缩略图（即该集剧照，写成与视频同名的 .jpg），
+# 在 fetch_images 里按 media_type == "episodedetails" 单独取。
 IMG_API_KEYS: Dict[str, str] = {"poster": "posters", "backdrop": "backdrops",
-                                "logo": "logos", "thumb": "stills"}
+                                "logo": "logos"}
 
 IMAGE_KINDS: Tuple[str, ...] = ("poster", "backdrop", "logo", "thumb",
                                 "banner", "disc", "clearart", "landscape")
 IMAGE_KIND_CN = {
-    "poster": "海报", "backdrop": "背景图", "logo": "徽标", "thumb": "剧集缩略图",
+    "poster": "海报", "backdrop": "背景图", "logo": "徽标", "thumb": "缩略图",
     "banner": "横幅图", "disc": "光盘图", "clearart": "透明艺术图", "landscape": "横版缩略图",
 }
 
@@ -378,7 +387,30 @@ FANART_KEYS: Dict[str, Tuple[str, ...]] = {
     "banner": ("moviebanner", "tvbanner"),
     "disc": ("moviedisc",),
     "clearart": ("hdmovieclearart", "movieart", "hdclearart"),
+    # MP 里 thumb 与 landscape 是同一张图的两个名（IMAGE_ALIASES: thumb⇄landscape），
+    # 都取自 fanart 的 moviethumb / tvthumb —— 这才是「横版缩略图」的正源。
+    # 这两类电影用 moviethumb、剧集用 tvthumb；具体哪个在前由调用方
+    # （fanart_image_urls 的 media_type 参数）决定，这里两个都给全做兜底。
+    "thumb": ("moviethumb", "tvthumb"),
     "landscape": ("moviethumb", "tvthumb"),
+}
+
+# 按媒体类型精确指定优先键：电影走 movie*，剧集走 tv*。
+# 缺省（未命中）时回退到 FANART_KEYS 的完整元组。
+FANART_KEYS_BY_TYPE: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "movie": {
+        "banner": ("moviebanner",),
+        "disc": ("moviedisc",),
+        "clearart": ("hdmovieclearart", "movieart"),
+        "thumb": ("moviethumb",),
+        "landscape": ("moviethumb",),
+    },
+    "tvshow": {
+        "banner": ("tvbanner",),
+        "clearart": ("hdclearart",),
+        "thumb": ("tvthumb",),
+        "landscape": ("tvthumb",),
+    },
 }
 
 # 季级别专用的 fanart 键：数组内每条都带 season 字段，按季号挑
@@ -446,10 +478,13 @@ def _fanart_request(tmdb_id: str, tvdb_id: str, api_key: str) -> Optional[dict]:
 
 
 def fanart_image_urls(kinds: set, tmdb_id: str, tvdb_id: str,
-                      api_key: str) -> Dict[str, str]:
+                      api_key: str, media_type: str = "") -> Dict[str, str]:
     """从 fanart.tv 取 TMDB 拿不到的那几类图，返回 {图片类型: 地址}。
 
     没有 Key、查不到、或这几类一个都不需要时返回空 dict，调用方自行兜底。
+    每个 kind 的候选键按顺序尝试，第一个有数据的就是它。传了 media_type 时
+    优先用 FANART_KEYS_BY_TYPE 的精确键（电影 movie*、剧集 tv*），避免先查
+    另一个类型专有的键再回退；未命中则回退 FANART_KEYS 的完整元组。
     """
     wanted = {kind for kind in kinds or () if kind in FANART_KEYS}
     if not wanted:
@@ -457,9 +492,10 @@ def fanart_image_urls(kinds: set, tmdb_id: str, tvdb_id: str,
     data = _fanart_request(tmdb_id, tvdb_id, api_key)
     if data is None:
         return {}
+    exact = FANART_KEYS_BY_TYPE.get(media_type) or {}
     out: Dict[str, str] = {}
     for kind in sorted(wanted):
-        for key in FANART_KEYS[kind]:
+        for key in (exact.get(kind) or FANART_KEYS[kind]):
             best = pick_fanart_image(data.get(key) or [])
             if best:
                 out[kind] = best
@@ -1118,28 +1154,40 @@ def write_image_bytes(path: Path, data: bytes, backup_root: Optional[Path], root
 def pick_best_image(entries: List[dict], language: str) -> Optional[dict]:
     """从 TMDB 的图片数组里挑一张。
 
-    排序优先级：语言匹配 → 分辨率（越大越好）→ 社区评分 → 投票数。
-    语言上先要本语言、再要无文字版（iso_639_1 为空）、其次英文、最后其他语言。
+    **只按语言优先级挑**，不再掺入分辨率 / 评分 / 投票数 —— 语言相同的那一批里
+    直接取 TMDB 返回顺序里的第一条（TMDB 自身就是按官方推荐度排的，越靠前越"钦定"）。
+
+    语言顺序：本语言 → 无文字版（iso_639_1 为空）→ 英文 → 其它语言。
+    这样做是为了与 MP 官方保持一致：MP 对根目录的 poster/backdrop/logo 直接取
+    TMDB 主记录里那一张（不带任何挑选），本函数取"同语言里的第一条"最接近该行为。
+
+    注意：早先版本还会比「分辨率越大越好 → 评分 → 投票数」，会挑出与 MP 不同的图
+    （TMDB 钦定图未必是分辨率最大的），表现为"两边图不一样"，故去掉。
     """
     lang = (language or "").split("-")[0].lower()
 
-    def rank(item: dict) -> Tuple[int, int, float, int]:
+    def lang_rank(item: dict) -> int:
         code = (item.get("iso_639_1") or "").lower()
         if lang and code == lang:
-            lang_rank = 0
-        elif not code:
-            lang_rank = 1
-        elif code == "en":
-            lang_rank = 2
-        else:
-            lang_rank = 3
-        return (lang_rank,
-                -int(item.get("width") or 0),
-                -float(item.get("vote_average") or 0),
-                -int(item.get("vote_count") or 0))
+            return 0
+        if not code:
+            return 1
+        if code == "en":
+            return 2
+        return 3
 
-    candidates = [item for item in entries or [] if item.get("file_path")]
-    return min(candidates, key=rank) if candidates else None
+    best: Optional[dict] = None
+    best_rank = 99
+    for item in entries or []:
+        if not item.get("file_path"):
+            continue
+        rank = lang_rank(item)
+        # 严格小于：语言更优才替换；同级保留先出现的（= TMDB 原始顺序第一条）
+        if rank < best_rank:
+            best, best_rank = item, rank
+        if best_rank == 0:
+            break
+    return best
 
 
 def image_size_for(quality: str, kind: str) -> str:
@@ -1400,8 +1448,15 @@ class TmdbProvider:
         if not data:
             return {}
         out: Dict[str, str] = {}
+        # 单集的缩略图是「这一集的剧照」，走 TMDB 的 stills（与根目录的横版缩略图不同）
+        episode_thumb_key = "stills" if media_type == "episodedetails" else None
         for kind in kinds:
-            best = pick_best_image(data.get(IMG_API_KEYS.get(kind, "")) or [], self.language)
+            api_key = IMG_API_KEYS.get(kind) or (episode_thumb_key if kind == "thumb" else None)
+            if not api_key:
+                # 电影/剧集/季的 thumb 不在 TMDB 的键里（TMDB 的 stills 是剧照，
+                # 不是横版缩略图），交给下面走 fanart 的 tvthumb / moviethumb
+                continue
+            best = pick_best_image(data.get(api_key) or [], self.language)
             if best:
                 out[kind] = f"{self.img_host}{self.image_size(kind)}{best['file_path']}"
         # 季：TMDB 只给 poster，banner / thumb 得去 fanart 的
@@ -1415,8 +1470,9 @@ class TmdbProvider:
                             season_missing, season, tvdb_id, self.fanart_key).items():
                         out.setdefault(kind, url)
             return out
-        # TMDB 只有海报 / 背景图 / 徽标 / 剧照；光盘图、横幅图、透明艺术图、横版缩略图
-        # 只有 fanart.tv 提供，需要额外查一次（电影按 tmdbid，剧集按 thetvdb id）
+        # TMDB 只有海报 / 背景图 / 徽标；缩略图（横版）、光盘图、横幅图、透明艺术图
+        # 只有 fanart.tv 提供，需要额外查一次（电影按 tmdbid，剧集按 thetvdb id）。
+        fanart_media_type = "movie" if media_type == "movie" else "tvshow"
         missing = {kind for kind in kinds if kind in FANART_KEYS and kind not in out}
         if missing and not self.fanart_key:
             if not getattr(self, "_warned_fanart_key", False):
@@ -1429,7 +1485,8 @@ class TmdbProvider:
         if missing:
             tvdb_id = self._tvdb_id(tmdb_id) if media_type != "movie" else ""
             for kind, url in fanart_image_urls(missing, tmdb_id, tvdb_id,
-                                               self.fanart_key).items():
+                                               self.fanart_key,
+                                               fanart_media_type).items():
                 out.setdefault(kind, url)
         return out
 
@@ -2703,7 +2760,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                         {"title": "海报（poster.jpg）", "value": "poster"},
                                         {"title": "背景图（backdrop.jpg + fanart.jpg）", "value": "backdrop"},
                                         {"title": "徽标（logo.png）", "value": "logo"},
-                                        {"title": "剧集缩略图（单集剧照 → 与视频同名的 .jpg）", "value": "thumb"},
+                                        {"title": "缩略图（thumb.jpg，横版；单集为同视频名的 .jpg）", "value": "thumb"},
                                         {"title": "横幅图（banner.jpg）", "value": "banner"},
                                         {"title": "光盘图（disc.png）", "value": "disc"},
                                         {"title": "透明艺术图（clearart.png）", "value": "clearart"},
@@ -2720,10 +2777,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                          "① 海报 → poster.jpg；"
                                          "② 背景图 → backdrop.jpg，并额外写一份 fanart.jpg（Kodi/Emby 认这个名）；"
                                          "③ 徽标 → logo.png；"
-                                         "④ 剧集缩略图 → 单集剧照，写成与该集视频同名的 .jpg（要求该集存在 NFO）；"
-                                         "⑤ 横幅图 → banner.jpg；⑥ 光盘图 → disc.png；"
-                                         "⑦ 透明艺术图 → clearart.png；⑧ 缩略图 → thumb.jpg，"
-                                         "并额外写一份 landscape.jpg（同名别名）。"
+                                         "④ 缩略图 → thumb.jpg，并额外写一份 landscape.jpg（同一张图的别名）；"
+                                         "电影/剧集/季目录的缩略图取自 fanart.tv 的横版图，"
+                                         "单集则用该集剧照写成与视频同名的 .jpg（要求该集存在 NFO）；"
+                                         "⑤ 横幅图 → banner.jpg；⑥ 光盘图 → disc.png（仅电影）；"
+                                         "⑦ 透明艺术图 → clearart.png。"
                                          "季图片与 MP 官方保持一致，**两处都写**："
                                          "该季目录内写通用名（poster.jpg / banner.jpg / thumb.jpg），"
                                          "剧集根目录同时写一份 seasonNN-poster.jpg（季 0 特别篇写 "

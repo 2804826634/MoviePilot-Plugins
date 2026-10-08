@@ -146,7 +146,7 @@ check("图片类型改为多选下拉框（multiple + chips），不再用只能
 check("图片类型选项为中文，并标注落盘文件名",
       all(f"'title': '{title}'" in form_json for title in
           ("海报（poster.jpg）", "背景图（backdrop.jpg + fanart.jpg）",
-           "徽标（logo.png）", "剧集缩略图（单集剧照 → 与视频同名的 .jpg）")))
+           "徽标（logo.png）", "缩略图（thumb.jpg，横版；单集为同视频名的 .jpg）")))
 check("图片说明里写全了落盘文件名，并写明季图两处都写（对齐 MP）",
       all(name in form_json for name in
           ("poster.jpg", "backdrop.jpg", "fanart.jpg", "logo.png"))
@@ -894,6 +894,8 @@ try:
         "moviebanner": [{"url": "http://a/b_en.jpg", "lang": "en", "likes": "5"},
                         {"url": "http://a/b_zh.jpg", "lang": "zh", "likes": "1"}],
         "moviedisc": [{"url": "http://a/d1.png", "lang": "00", "likes": "9"}],
+        "moviethumb": [{"url": "http://a/mt_zh.jpg", "lang": "zh", "likes": "7"}],
+        "tvthumb": [{"url": "http://a/tt_zh.jpg", "lang": "zh", "likes": "7"}],
         "seasonposter": [
             {"url": "http://a/s1p.jpg", "lang": "zh", "likes": "3", "season": "1"},
             {"url": "http://a/s2p.jpg", "lang": "zh", "likes": "9", "season": "2"},
@@ -945,6 +947,27 @@ try:
         module.urllib.request.urlopen = _orig_urlopen
     check("剧集按 thetvdb id 查询", "/v3/tv/355730?api_key=KEY" in captured.get("url", "")
           and urls_tv.get("banner") == "http://a/b_zh.jpg", captured.get("url", ""))
+
+    # thumb / landscape 走 fanart 的横版缩略图，且按媒体类型选对键
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        thumb_movie = module.fanart_image_urls({"thumb", "landscape"}, "812", "", "KEY",
+                                               "movie")
+    finally:
+        module.urllib.request.urlopen = _orig_urlopen
+    check("电影 thumb/landscape 取 fanart 的 moviethumb（横版缩略图）",
+          thumb_movie.get("thumb") == "http://a/mt_zh.jpg"
+          and thumb_movie.get("landscape") == "http://a/mt_zh.jpg", str(thumb_movie))
+
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        thumb_tv = module.fanart_image_urls({"thumb", "landscape"}, "", "355730", "KEY",
+                                            "tvshow")
+    finally:
+        module.urllib.request.urlopen = _orig_urlopen
+    check("剧集 thumb/landscape 取 fanart 的 tvthumb",
+          thumb_tv.get("thumb") == "http://a/tt_zh.jpg"
+          and thumb_tv.get("landscape") == "http://a/tt_zh.jpg", str(thumb_tv))
 
     check("没有 Key 时不发请求、返回空",
           module.fanart_image_urls({"banner", "disc"}, "812", "", "") == {})
@@ -1129,7 +1152,7 @@ check("save_data 记录了图片统计",
       (mock_host.DATA.get("nfogapfill_report") or {}).get("images_scanned", 0) > 0)
 check("报告文件指明模式与数据源", "数据源" in text)
 
-# pick_best_image：语言优先 → 分辨率 → 评分
+# pick_best_image：**只**按语言优先级挑，同级取 TMDB 原始顺序第一条
 candidates = [
     {"file_path": "/en_hi.jpg", "iso_639_1": "en", "width": 2000, "height": 3000,
      "vote_average": 9.0, "vote_count": 50},
@@ -1144,13 +1167,22 @@ check("同语言优先（选到 zh 那张，而不是票数最高的 en）",
 best_other = module.pick_best_image([c for c in candidates if c["iso_639_1"] != "zh"], "ja-JP")
 check("无本语言时：无文字版优先于英文版",
       best_other is not None and best_other["file_path"] == "/textless.jpg")
+
+# 同级不再比分辨率/评分/票数 —— 取原始顺序第一条（对齐 MP 的"钦定图"行为）
 best_res = module.pick_best_image(
     [{"file_path": "/small.jpg", "iso_639_1": None, "width": 500,
       "vote_average": 9.0, "vote_count": 99},
      {"file_path": "/big.jpg", "iso_639_1": None, "width": 2000,
       "vote_average": 5.0, "vote_count": 1}], "zh")
-check("同语言档位内按分辨率优先（本地图库要清晰度）",
-      best_res is not None and best_res["file_path"] == "/big.jpg")
+check("同语言档位内取 TMDB 原始顺序第一条（不再按分辨率挑）",
+      best_res is not None and best_res["file_path"] == "/small.jpg")
+best_order = module.pick_best_image(
+    [{"file_path": "/zh_first.jpg", "iso_639_1": "zh", "width": 300,
+      "vote_average": 1.0, "vote_count": 0},
+     {"file_path": "/zh_second.jpg", "iso_639_1": "zh", "width": 9999,
+      "vote_average": 9.9, "vote_count": 999}], "zh")
+check("多条本语言时保留第一条（不被票数/分辨率带偏）",
+      best_order is not None and best_order["file_path"] == "/zh_first.jpg")
 check("候选为空时返回 None", module.pick_best_image([], "zh") is None)
 check("没有 file_path 的候选被忽略",
       module.pick_best_image([{"iso_639_1": "zh", "width": 9999}], "zh") is None)
@@ -1183,10 +1215,26 @@ check("fanart 键名映射与 MoviePilot 的 FanartModule 一致",
       and module.FANART_KEYS["disc"] == ("moviedisc",)
       and "hdmovieclearart" in module.FANART_KEYS["clearart"]
       and "moviethumb" in module.FANART_KEYS["landscape"])
+check("根目录的 thumb 也走 fanart 的横版缩略图（不再用 TMDB 的 stills 剧照）",
+      module.FANART_KEYS["thumb"] == ("moviethumb", "tvthumb")
+      and "thumb" not in module.IMG_API_KEYS)
+check("按媒体类型精确指定 fanart 键：电影 movie*、剧集 tv*",
+      module.FANART_KEYS_BY_TYPE["movie"]["thumb"] == ("moviethumb",)
+      and module.FANART_KEYS_BY_TYPE["tvshow"]["thumb"] == ("tvthumb",)
+      and module.FANART_KEYS_BY_TYPE["tvshow"]["banner"] == ("tvbanner",))
+check("剧集没有 disc（按类型精确表里不含）",
+      "disc" not in module.FANART_KEYS_BY_TYPE["tvshow"])
 check("季专用 fanart 键与 MP 的 seasonposter/seasonbanner/seasonthumb 对齐",
       module.FANART_SEASON_KEYS["poster"] == ("seasonposter",)
       and module.FANART_SEASON_KEYS["banner"] == ("seasonbanner",)
       and module.FANART_SEASON_KEYS["thumb"] == ("seasonthumb",))
+
+# 单集的缩略图必须是「这一集的剧照」(TMDB stills)，不能被根目录那套 fanart 逻辑顶掉
+import inspect as _inspect
+_fetch_src = _inspect.getsource(module.TmdbProvider.fetch_images)
+check("单集缩略图仍取 TMDB 的 stills（该集剧照）",
+      'stills' in _fetch_src and 'episodedetails' in _fetch_src,
+      "fetch_images 里应有 episode_thumb_key = 'stills'")
 
 # 剧集：MP 的 tv 允许集合里**没有 disc**，所以 image_targets 不该产出 disc.png
 tvshow_nfo = module.load_nfo(FIX / "电视剧" / "怪奇物语 (2016)" / "tvshow.nfo")

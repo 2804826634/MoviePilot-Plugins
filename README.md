@@ -108,6 +108,27 @@ else:                return False     # 存在 → 跳过，从不关心内容�
 >
 > 某一季在线没有海报时会**明确标注缺失**（报告里显示「N 季在线没有海报，已跳过」），并且**绝不回退**用剧集海报或其它季的海报顶替。
 
+> **选图策略（v1.7.7 起与 MP 的取图口径对齐）**：海报 / 背景图 / 徽标来自 TMDB，
+> 挑选规则是**只按语言优先级**（本语言 → 无文字版 → 英文 → 其它），同语言档位内
+> **取 TMDB 返回顺序里的第一条**（TMDB 本身按官方推荐度排序，越靠前越"钦定"）。
+> 早先版本还会比「分辨率越大越好 → 社区评分 → 投票数」，会挑到与 MP 不同的图
+> （表现为"同一部剧两边图不一样"），现已去掉这几级排序。
+>
+> 根目录 / 季目录的 `thumb`、`landscape` 取自 **fanart.tv 的横版缩略图**
+> （`moviethumb` / `tvthumb` / `seasonthumb`），而不是 TMDB 的 `stills`。
+> TMDB 的 `stills` 是**剧照**（横竖构图都有、多为竖版人物特写），只用于**单集**缩略图。
+> 早先版本把根目录的 thumb 也接到 `stills`，写出来的 `thumb.jpg` 经常是竖图 ——
+> 这是与 MP 的一处偏离，已修正。
+>
+> ⚠️ **与 MP 的两处可解释差异**（不是故障）：
+> 1. **内容可能不同**：MP 对根目录的 `poster` / `backdrop` / `logo` 直接取 TMDB
+>    **主记录里那一张**（`MediaInfo.poster_path` / `backdrop_path` / `logo_path`，即 TMDB 钦定图），
+>    本插件则从 `images` 接口的候选里按语言挑。语言优先能保证拿到**中文**图
+>    （这是刻意的：有中文 logo / 海报时常更好），但与 MP 的钦定图不保证逐字节相同。
+> 2. **产出类型可能不同**：MP 的 `thumb` / `landscape` 靠 fanart 模块动态注入
+>    （`tvthumb` → `thumb_path`），**该剧 fanart 没有对应数据时就不写**；
+>    本插件同样如此 —— 所以「MP 那边没有 `landscape.jpg`」通常是 fanart 缺数据的正常结果。
+
 ### fanart.tv 那几类怎么配置
 
 光盘图 / 横幅图 / 透明艺术图 / 横版缩略图 **只有 fanart.tv 有**（TMDB 只提供 海报 / 背景图 / 徽标 / 剧照）。
@@ -383,14 +404,14 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季图双落点）
-python tests/_self_test_plugin.py   # 插件面 195 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试/MP 图片类型与命名对齐）
+python tests/_self_test_plugin.py   # 插件面 202 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试/MP 图片类型与命名对齐）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、
 二次运行幂等（零写入）、保护字段生效、`gapfill` 模式不替换、表单控件与默认配置一一对应、端到端出报告并发通知；
 图片部分另外覆盖：缺失补齐、`fanart` 别名同内容、季图两处都写（季目录通用名 + 剧集根目录 seasonNN 副本）、单集缩略图命名、
 指纹匹配零下载幂等、错图被替换且原图入备份、`image_mode=missing/off` 行为、
-`lockdata` 连图片一起锁、TMDB 选图策略（语言 → 分辨率 → 评分）、尺寸档位按类型区分、
+`lockdata` 连图片一起锁、TMDB 选图策略（只按语言、同级取第一条）、尺寸档位按类型区分、
 与 MP 官方的类型集合/文件名逐项对齐（剧集不写 disc、thumb 与 landscape 成对、季图双落点、特别篇 season-specials-poster）。
 
 ---
