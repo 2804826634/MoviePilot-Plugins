@@ -124,7 +124,8 @@ defaults = form[1]
 expected_keys = {"enabled", "onlyonce", "notify", "mode", "cron", "dry_run", "respect_lock",
                  "backup", "paths", "exclude_paths", "protect_fields",
                  "tmdb_api_key", "language", "cert_country", "cast_limit",
-                 "image_mode", "image_kinds", "image_quality"}
+                 "image_mode", "tmdb_image_kinds", "fanart_image_kinds",
+                 "image_quality", "image_sources"}
 check("默认配置包含全部配置项", expected_keys <= set(defaults),
       f"缺少 {expected_keys - set(defaults)}")
 form_json = str(form[0])
@@ -140,24 +141,42 @@ print("本次针对反馈调整的配置项")
 print("=" * 70)
 check("「单轮最多处理文件数」已移除",
       "max_files" not in defaults and "'model': 'max_files'" not in form_json)
-check("图片类型改为多选下拉框（multiple + chips），不再用只能单选的复选框",
-      "'model': 'image_kinds'" in form_json
+check("图片类型拆成两个多选下拉框（TMDB 一个 / fanart.tv 一个），不再用只能单选的复选框",
+      all(f"'model': '{k}'" in form_json for k in ("tmdb_image_kinds", "fanart_image_kinds"))
+      and "'model': 'image_kinds'" not in form_json
       and "'multiple': True" in form_json and "'chips': True" in form_json
       and "'component': 'VCheckbox'" not in form_json)
-check("图片类型选项为中文，并标注落盘文件名",
+check("两个下拉框分别标注了所属数据源",
+      "TMDB 提供的图片类型（可多选）" in form_json
+      and "fanart.tv 提供的图片类型（可多选）" in form_json)
+check("TMDB 下拉只列出 TMDB 真的会返回的类型（海报 / 背景图 / 徽标 / 单集剧照）",
       all(f"'title': '{title}'" in form_json for title in
           ("海报（poster.jpg）", "背景图（backdrop.jpg + fanart.jpg）",
-           "徽标（logo.png）", "缩略图（thumb.jpg，横版；单集为同视频名的 .jpg）")))
+           "徽标（logo.png）", "剧集缩略图（单集剧照 → 与视频同名的 .jpg）")))
+check("fanart 下拉只列出 fanart 独有的类型（横版缩略图 / 横幅图 / 光盘图 / 透明艺术图 / 别名 landscape）",
+      all(f"'title': '{title}'" in form_json for title in
+          ("横版缩略图（thumb.jpg + landscape.jpg）", "横幅图（banner.jpg）",
+           "光盘图（disc.png，仅电影）", "透明艺术图（clearart.png）",
+           "横版缩略图别名（landscape.jpg）")))
 check("图片说明里写全了落盘文件名，并写明季图两处都写（对齐 MP）",
       all(name in form_json for name in
           ("poster.jpg", "backdrop.jpg", "fanart.jpg", "logo.png"))
       and "seasonNN-poster.jpg" in form_json
       and "两处都写" in form_json)
-check("图片类型默认全选", sorted(defaults["image_kinds"]) == sorted(module.IMAGE_KINDS))
+check("两个下拉默认都全选（并集 = 全部 8 类）",
+      sorted(defaults["tmdb_image_kinds"]) == sorted(module.TMDB_IMAGE_KINDS)
+      and sorted(defaults["fanart_image_kinds"]) == sorted(module.FANART_IMAGE_KINDS)
+      and sorted(module.merge_image_kinds(defaults["tmdb_image_kinds"],
+                                          defaults["fanart_image_kinds"]))
+      == sorted(module.IMAGE_KINDS))
+check("图片来源优先级默认 TMDB 优先、fanart.tv 其次",
+      defaults["image_sources"] == "tmdb,fanart"
+      and module.image_source_order(defaults["image_sources"]) == ["tmdb", "fanart"])
+check("图片来源优先级下拉列了四种组合",
+      all(v in form_json for v in ("tmdb,fanart", "fanart,tmdb", "tmdb", "fanart"))
+      and "'model': 'image_sources'" in form_json)
 check("图片类型已扩到 8 类，且标注了数据来源（TMDB + fanart.tv）",
-      all(f"'title': '{t}'" in form_json for t in
-          ("横幅图（banner.jpg）", "光盘图（disc.png）",
-           "透明艺术图（clearart.png）", "横版缩略图（landscape.jpg）"))
+      len(module.IMAGE_KINDS) == 8
       and "fanart.tv" in form_json and "FANART_API_KEY" in form_json)
 check("演员写入上限改为下拉选项，且含「全部」",
       "'model': 'cast_limit'" in form_json
@@ -166,8 +185,9 @@ check("分级地区码改为单选下拉，含常用地区",
       "'model': 'cert_country', 'label': '分级地区码（决定 mpaa 取哪个地区的分级）'" in form_json
       and all(f"'value': '{code}'" in form_json
               for code in ("US", "CN", "HK", "TW", "JP", "GB", "DE")))
-check("全表单只有图片类型是多选（分级地区码保持单选）",
-      form_json.count("'multiple': True") == 1)
+check("全表单只有这两个图片类型下拉是多选（分级地区码 / 图片处理 / 画质 / 来源优先级都是单选）",
+      form_json.count("'multiple': True") == 2
+      and form_json.count("'multiple': True") == form_json.count("'chips': True"))
 check("分级地区码给了完整说明（mpaa 与各地区分级差异）",
       "分级地区码」怎么填" in form_json and "PG-13" in form_json)
 check("「字段白名单」与「网络代理」已从配置项中移除",
@@ -205,10 +225,58 @@ check("修复结果只含合法值（界面不会再冒出 false 这种 chip）"
           (module.normalize_image_kinds(False) or []) + module.normalize_image_kinds(True)))
 
 # init_plugin 还会把修正结果回写配置库，否则界面会一直挂着脏值
+# 注意：两个新下拉一旦存在，就以它们为准（并集），旧的 image_kinds 布尔脏值被忽略。
 repair_plugin = module.NfoGapFill()
 repair_plugin.init_plugin({**defaults, "image_kinds": False})
-check("init_plugin 把布尔脏值收敛成空列表", repair_plugin._image_kinds == [])
-check("并把修正结果回写进配置库", repair_plugin.get_config().get("image_kinds") == [])
+check("两个下拉都在时，旧的布尔脏值不再影响处理集合（并集 = 全选）",
+      sorted(repair_plugin._image_kinds) == sorted(module.IMAGE_KINDS))
+check("旧键 image_kinds 被回写成干净列表（界面不再挂 false）",
+      repair_plugin.get_config().get("image_kinds") == list(module.IMAGE_KINDS))
+# 只给旧配置（无两个新下拉）时，布尔脏值仍按老规则收敛
+legacy_plugin = module.NfoGapFill()
+legacy_plugin.init_plugin({"paths": "/m/a", "image_kinds": False})
+check("只给旧配置 image_kinds=False 时 = 不处理任何图片",
+      legacy_plugin._image_kinds == [])
+check("并把它回写成空列表（界面不再挂 false）",
+      legacy_plugin.get_config().get("image_kinds") == [])
+
+# 两个下拉的并集语义（v1.7.7 把单一下拉拆成 TMDB / fanart 各一个）
+check("merge_image_kinds 取两个下拉的并集，且顺序按 IMAGE_KINDS 规范",
+      module.merge_image_kinds(["poster"], ["banner"]) == ["poster", "banner"]
+      and module.merge_image_kinds(["thumb"], ["thumb"]) == ["thumb"])
+check("merge_image_kinds 只认各源允许的类型（TMDB 下拉里塞 banner 会被丢掉）",
+      module.merge_image_kinds(["poster", "banner"], None) == ["poster"]
+      and module.merge_image_kinds(None, ["banner", "poster"]) == ["banner"])
+check("两个下拉都是 null（未配置）时回落到老配置 image_kinds",
+      module.merge_image_kinds(None, None, ["poster", "logo"]) == ["poster", "logo"])
+check("两个下拉都清空 = 空列表（不偷偷回退成全选）",
+      module.merge_image_kinds([], []) == [])
+check("两个下拉与老配置都缺失时返回 None（交给上层判定为全选）",
+      module.merge_image_kinds(None, None) is None)
+check("normalize_image_kinds 指定 allowed 池后只认池内值",
+      module.normalize_image_kinds(["poster", "banner"], module.TMDB_IMAGE_KINDS,
+                                   fallback_all=False) == ["poster"]
+      and module.normalize_image_kinds(None, module.TMDB_IMAGE_KINDS,
+                                       fallback_all=False) is None
+      and module.normalize_image_kinds([], module.TMDB_IMAGE_KINDS,
+                                       fallback_all=False) == [])
+
+# 拆分后：两个下拉任一为脏值都要被回写修正，且并集 = 实际处理集合
+repair2 = module.NfoGapFill()
+repair2.init_plugin({**defaults,
+                     "tmdb_image_kinds": ["poster", "bogus"],
+                     "fanart_image_kinds": None})
+check("init_plugin 收敛 TMDB 下拉的脏值并保留合法项",
+      repair2._tmdb_image_kinds == ["poster"])
+check("TMDB 下拉非空时，fanart 下拉的 null 视为「空」（并集只由有值的一边决定）",
+      repair2._image_kinds == ["poster"])
+check("两个下拉的并集就是最终处理集合",
+      sorted(repair2._image_kinds)
+      == sorted(module.merge_image_kinds(repair2._tmdb_image_kinds,
+                                         repair2._fanart_image_kinds)))
+check("修正后的两个下拉都被回写进配置库",
+      repair2.get_config().get("tmdb_image_kinds") == ["poster"]
+      and repair2.get_config().get("fanart_image_kinds") == [])
 
 # 媒体库目录的 #类型 限定
 roots, types = module.parse_root_specs(["/m/电影#电影", "/m/剧集#电视剧", "/m/其它"])

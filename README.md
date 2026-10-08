@@ -294,9 +294,18 @@ docker restart moviepilot-v2
 | `language` | `zh-CN` | 元数据语言（`zh-CN` / `zh-TW` / `en-US` / `ja-JP`） |
 | `cert_country` | `US` | 分级地区码，**单选下拉**：决定 NFO 的 `<mpaa>` 取哪个地区的分级（见下） |
 | `image_mode` | `sync` | 图片处理：`sync` / `missing` / `off`，见上节 |
-| `image_kinds` | 四种全选 | 处理的图片类型，**多选下拉**：海报 / 背景图 / 徽标 / 剧集缩略图（全不选 = 不处理图片） |
+| `tmdb_image_kinds` | 四项全选 | **TMDB 提供的图片类型**（多选下拉）：海报 / 背景图 / 徽标 / 剧集缩略图（单集剧照） |
+| `fanart_image_kinds` | 五项全选 | **fanart.tv 提供的图片类型**（多选下拉）：横版缩略图 / 横幅图 / 光盘图 / 透明艺术图 / 别名 landscape |
 | `image_quality` | `standard` | 画质档：`standard`（海报 w780 / 背景图 w1280 / 徽标 w500）或 `original`（最清晰、体积大） |
 | `image_sources` | `tmdb,fanart` | **图片来源优先级**：`tmdb,fanart`（TMDB 优先）/ `fanart,tmdb` / `tmdb`（只用 TMDB）/ `fanart`（只用 fanart） |
+
+> **图片类型拆成两个下拉（v1.7.7 起）**：一个列 **TMDB 能给的**（海报 / 背景图 / 徽标 / 单集剧照），
+> 一个列 **fanart.tv 才有的**（横幅图 / 光盘图 / 透明艺术图 / 横版缩略图）。
+> 最终处理的是**两个下拉的并集** —— 这样「哪些类型来自哪个源」在界面上一眼可见，不用再猜。
+> 「缩略图（`thumb`）」两边都列了：电影 / 剧集 / 季目录的 thumb 取自 fanart 的横版图，
+> 单集的 thumb 取自 TMDB 的该集剧照，**勾任意一边即可生效**（同名文件只写一次）。
+> 两个下拉**都清空 = 不处理任何图片**（不会偷偷回退成全选）。
+> 旧的单一 `image_kinds` 键仍被兼容：没有两个新下拉时按老值迁移（自动拆到两个下拉里）。
 
 > 🔧 **升级自 v1.2.0 的会自动修好一个历史脏值**：那一版用复选框渲染图片类型，而宿主当时把它当单值处理，
 > 于是配置里存成了 `true` / `false`，界面上会冒出一个写着 `false` 的怪 chip。
@@ -415,7 +424,7 @@ python plugins.v2/nfogapfill/__init__.py --root /media/link --source tmdb --api-
 
 ```bash
 python tests/_self_test.py          # 引擎行为 65 项断言（含图片补齐/别名/指纹幂等/#类型限定/并发一致性/季图双落点）
-python tests/_self_test_plugin.py   # 插件面 224 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试与域名覆盖/图片备用源/来源优先级/MP 图片类型与命名对齐）
+python tests/_self_test_plugin.py   # 插件面 240 项断言（伪造 MP 宿主 + 表单/页面/选图/尺寸/指纹/目录类型/脏配置修复/结构化值剥离/脏值清理/fanart/并发与限速/id 与季集号解析/网络重试与域名覆盖/图片备用源/来源优先级/图片类型双下拉与并集/MP 图片类型与命名对齐）
 ```
 
 覆盖：相同字段不被触碰、缺失被补齐、不一致被替换、`lockdata` 阻止替换、写入前备份、

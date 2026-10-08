@@ -251,6 +251,17 @@ IMAGE_KIND_CN = {
     "banner": "横幅图", "disc": "光盘图", "clearart": "透明艺术图", "landscape": "横版缩略图",
 }
 
+# 每个数据源**真正能提供**的图片类型。用户界面按这个分两个下拉，
+# 避免出现「勾了但那个源根本没有」的困惑。
+#
+#   TMDB   ：posters / backdrops / logos（单集另有 stills 剧照 → thumb）
+#   fanart ：moviethumb / tvthumb / seasonthumb → thumb、landscape；
+#            banner / disc / clearart 也只有 fanart 有
+# 注意 `thumb` 两边都能出（根目录/季来自 fanart 的横版图，单集来自 TMDB 剧照），
+# 所以它同时出现在两个列表里 —— 由「图片类型」的并集决定最终处理哪些。
+TMDB_IMAGE_KINDS: Tuple[str, ...] = ("poster", "backdrop", "logo", "thumb")
+FANART_IMAGE_KINDS: Tuple[str, ...] = ("thumb", "landscape", "banner", "disc", "clearart")
+
 IMG_OFF, IMG_MISSING, IMG_SYNC = "off", "missing", "sync"
 
 # ── 图片来源优先级 ─────────────────────────────────────────────────────
@@ -1295,8 +1306,13 @@ def image_size_for(quality: str, kind: str) -> str:
     return IMG_SIZES.get(quality, IMG_SIZES["standard"]).get(kind, "original")
 
 
-def normalize_image_kinds(raw: Any) -> Optional[List[str]]:
-    """把 image_kinds 的历史各种写法收敛成合法的类型列表。
+def normalize_image_kinds(raw: Any, allowed: Any = None,
+                          fallback_all: bool = True) -> Optional[List[str]]:
+    """把图片类型配置收敛成合法的类型列表。
+
+    `allowed` 给定时只在其中取值（用于按数据源分列的两个下拉：
+    TMDB 那个只认 poster/backdrop/logo/thumb，fanart 那个只认 thumb/landscape/...）；
+    不给则用全部 `IMAGE_KINDS`。
 
     历史上这个配置项换过三种载体，必须都能吃下并修好：
 
@@ -1306,21 +1322,50 @@ def normalize_image_kinds(raw: Any) -> Optional[List[str]]:
     - **逗号字符串**：最早期的写法，以及 CLI 传参。
 
     返回 None 表示「压根没配过」（键缺失），由调用方决定默认值。
+    `fallback_all` 控制「整串都没写对」时是否回退成全选（旧行为是回退，避免老的逗号串静默不干活）。
     """
+    pool = tuple(allowed) if allowed is not None else IMAGE_KINDS
     if raw is None:
         return None
     if isinstance(raw, bool):
-        return list(IMAGE_KINDS) if raw else []
+        return list(pool) if raw else []
     if isinstance(raw, (list, tuple, set)):
         wanted = {str(item).strip().casefold() for item in raw if str(item).strip()}
-        return [kind for kind in IMAGE_KINDS if kind in wanted]
+        return [kind for kind in pool if kind in wanted]
 
     text = str(raw).strip()
     if not text:
         return []
     wanted = {part.strip().casefold() for part in re.split(r"[,\s]+", text) if part.strip()}
-    picked = [kind for kind in IMAGE_KINDS if kind in wanted]
-    return picked or list(IMAGE_KINDS)      # 整串都没写对时回退全部，避免静默不干活
+    picked = [kind for kind in pool if kind in wanted]
+    if picked:
+        return picked
+    return list(pool) if fallback_all else []
+
+
+def merge_image_kinds(tmdb_raw: Any, fanart_raw: Any,
+                      legacy_raw: Any = None) -> Optional[List[str]]:
+    """把「TMDB 类型」与「fanart 类型」两个下拉合并成一份要处理的类型列表。
+
+    规则：
+    - 两个新键都没配过（None）→ 若是从旧版的 `image_kinds` 升级而来，用旧值；
+      否则回退成全选（保持老用户「默认全开」的体验不变）。
+    - 任一新键配过 → 两个列表取并集；**明确全不选**（`[]`）也算配过，
+      这样「两个都空」= 不处理图片，语义清晰、不会偷偷回退成全选。
+
+    返回 None 表示「没有任何线索」，由调用方决定默认。
+    """
+    tmdb = normalize_image_kinds(tmdb_raw, TMDB_IMAGE_KINDS, fallback_all=False)
+    fanart = normalize_image_kinds(fanart_raw, FANART_IMAGE_KINDS, fallback_all=False)
+    if tmdb is None and fanart is None:
+        if legacy_raw is None:
+            return None
+        return normalize_image_kinds(legacy_raw)
+    merged: List[str] = []
+    for kind in IMAGE_KINDS:                       # 按标准顺序去重
+        if kind in (tmdb or []) or kind in (fanart or []):
+            merged.append(kind)
+    return merged
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2705,7 +2750,9 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _cast_limit: str = "20"
     _notify: bool = True
     _image_mode: str = IMG_SYNC
-    _image_kinds: Any = IMAGE_KINDS          # 统一由 normalize_image_kinds 收敛成列表
+    _image_kinds: Any = IMAGE_KINDS          # 合并后的「要处理哪些类型」（引擎用）
+    _tmdb_image_kinds: Any = TMDB_IMAGE_KINDS    # TMDB 下拉（界面展示）
+    _fanart_image_kinds: Any = FANART_IMAGE_KINDS  # fanart 下拉（界面展示）
     _image_quality: str = "standard"
     _image_sources: Any = IMAGE_SOURCES      # 统一由 image_source_order 收敛成有序列表
     _event: Event = Event()
@@ -2735,10 +2782,29 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._image_mode = config.get("image_mode") or IMG_SYNC
             # 图片类型：收敛成一个干净的列表；若与存下来的值不同就顺手修正回去，
             # 否则界面上会一直挂着历史遗留的怪值（例如旧版复选框存下的 false）
-            kinds = normalize_image_kinds(config.get("image_kinds"))
+            # 图片类型现在拆成两个下拉：TMDB 类型 + fanart 类型，合并成一份要处理的列表。
+            # 旧的单一 image_kinds 仍兼容（升级用户不会丢配置）。
+            kinds = merge_image_kinds(config.get("tmdb_image_kinds"),
+                                      config.get("fanart_image_kinds"),
+                                      config.get("image_kinds"))
             self._image_kinds = list(IMAGE_KINDS) if kinds is None else kinds
             if config.get("image_kinds") != self._image_kinds:
                 repair["image_kinds"] = self._image_kinds
+            # 把两个新下拉也回写成干净值（只保留该源认得的部分），避免界面挂脏值
+            tmdb_kinds = normalize_image_kinds(config.get("tmdb_image_kinds"),
+                                               TMDB_IMAGE_KINDS, fallback_all=False)
+            if tmdb_kinds is None:
+                tmdb_kinds = [k for k in TMDB_IMAGE_KINDS if k in self._image_kinds]
+            fanart_kinds = normalize_image_kinds(config.get("fanart_image_kinds"),
+                                                 FANART_IMAGE_KINDS, fallback_all=False)
+            if fanart_kinds is None:
+                fanart_kinds = [k for k in FANART_IMAGE_KINDS if k in self._image_kinds]
+            self._tmdb_image_kinds = tmdb_kinds
+            self._fanart_image_kinds = fanart_kinds
+            if config.get("tmdb_image_kinds") != tmdb_kinds:
+                repair["tmdb_image_kinds"] = tmdb_kinds
+            if config.get("fanart_image_kinds") != fanart_kinds:
+                repair["fanart_image_kinds"] = fanart_kinds
             self._image_quality = config.get("image_quality") or "standard"
             # 图片来源优先级：收敛成有序列表，非法值顺手修正回默认
             self._image_sources = image_source_order(config.get("image_sources"))
@@ -2913,22 +2979,47 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                                 {"component": "VSelect", "props": {
-                                    "model": "image_kinds",
-                                    "label": "处理的图片类型（可多选）",
+                                    "model": "tmdb_image_kinds",
+                                    "label": "TMDB 提供的图片类型（可多选）",
                                     "multiple": True,
                                     "chips": True,
                                     "items": [
                                         {"title": "海报（poster.jpg）", "value": "poster"},
                                         {"title": "背景图（backdrop.jpg + fanart.jpg）", "value": "backdrop"},
                                         {"title": "徽标（logo.png）", "value": "logo"},
-                                        {"title": "缩略图（thumb.jpg，横版；单集为同视频名的 .jpg）", "value": "thumb"},
-                                        {"title": "横幅图（banner.jpg）", "value": "banner"},
-                                        {"title": "光盘图（disc.png）", "value": "disc"},
-                                        {"title": "透明艺术图（clearart.png）", "value": "clearart"},
-                                        {"title": "横版缩略图（landscape.jpg）", "value": "landscape"},
+                                        {"title": "剧集缩略图（单集剧照 → 与视频同名的 .jpg）", "value": "thumb"},
                                     ]}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "fanart_image_kinds",
+                                    "label": "fanart.tv 提供的图片类型（可多选）",
+                                    "multiple": True,
+                                    "chips": True,
+                                    "items": [
+                                        {"title": "横版缩略图（thumb.jpg + landscape.jpg）", "value": "thumb"},
+                                        {"title": "横幅图（banner.jpg）", "value": "banner"},
+                                        {"title": "光盘图（disc.png，仅电影）", "value": "disc"},
+                                        {"title": "透明艺术图（clearart.png）", "value": "clearart"},
+                                        {"title": "横版缩略图别名（landscape.jpg）", "value": "landscape"},
+                                    ]}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                                 "text": "两个下拉各管一个数据源，最终处理的是它们的**并集**。"
+                                         "这样的好处是「哪些类型来自 TMDB、哪些来自 fanart.tv」一眼可见 —— "
+                                         "TMDB 只有 海报 / 背景图 / 徽标 / 单集剧照；"
+                                         "fanart.tv 才有 横幅图 / 光盘图 / 透明艺术图 / 横版缩略图。"
+                                         "注意「缩略图（thumb）」两边都有："
+                                         "电影 / 剧集 / 季目录的 thumb 取自 fanart 的横版图，"
+                                         "单集的 thumb 取自 TMDB 该集剧照 —— 所以两个下拉里都能勾到它，"
+                                         "勾任意一边即可生效（同名文件只写一次）。"
+                                         "两个下拉都清空 = 不处理任何图片（不会偷偷回退成全选）。"}]},
                         ],
                     },
                     {
@@ -3134,8 +3225,10 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "cert_country": "US",
             "cast_limit": "20",
             "image_mode": IMG_SYNC,
-            "image_kinds": list(IMAGE_KINDS),
+            "tmdb_image_kinds": list(TMDB_IMAGE_KINDS),
+            "fanart_image_kinds": list(FANART_IMAGE_KINDS),
             "image_quality": "standard",
+            "image_sources": ",".join(IMAGE_SOURCES),
         }
 
     def get_page(self) -> List[dict]:
@@ -3314,7 +3407,10 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "cast_limit": self._cast_limit,
                 "image_mode": self._image_mode,
                 "image_kinds": self._image_kinds,
+                "tmdb_image_kinds": self._tmdb_image_kinds,
+                "fanart_image_kinds": self._fanart_image_kinds,
                 "image_quality": self._image_quality,
+                "image_sources": ",".join(self._image_sources),
             })
         except Exception as exc:
             logger.warning(f"保存插件配置失败：{exc}")
@@ -3537,7 +3633,9 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--image-mode", choices=["off", "missing", "sync"], default="off",
                         help="图片处理：off 不处理（CLI 默认）/ missing 只补缺失 / sync 不一致则替换")
     parser.add_argument("--image-kinds", default="poster,backdrop,logo,thumb",
-                        help="处理的图片类型，逗号分隔（默认四种全开）")
+                        help="处理的图片类型，逗号分隔（默认四种全开；"
+                             "可选 poster/backdrop/logo/thumb/banner/disc/clearart/landscape，"
+                             "即「TMDB 下拉 ∪ fanart 下拉」的并集）")
     parser.add_argument("--image-quality", choices=["standard", "original"], default="standard",
                         help="图片画质，默认 standard（海报 w780 / 背景图 w1280 / 徽标 w500）")
     parser.add_argument("--image-sources", default="tmdb,fanart",
