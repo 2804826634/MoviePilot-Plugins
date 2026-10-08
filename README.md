@@ -2,7 +2,7 @@
 
 > 收录一个自用插件：**NFO 与图片差异比对**（NfoGapFill）。
 
-![version](https://img.shields.io/badge/version-1.8.5-blue)
+![version](https://img.shields.io/badge/version-1.8.6-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/MoviePilot-v2%20%7C%20v3-9cf)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
@@ -19,7 +19,7 @@
 
 | 插件 ID | 名称 | 说明 | 版本 |
 | --- | --- | --- | --- |
-| [`NfoGapFill`](docs/NfoGapFill.md) | NFO 与图片差异比对 | 本地 NFO / 海报 / 背景图与在线元数据的**内容比对**：缺失补齐、不一致替换、一致跳过 | 1.8.5 |
+| [`NfoGapFill`](docs/NfoGapFill.md) | NFO 与图片差异比对 | 本地 NFO / 海报 / 背景图与在线元数据的**内容比对**：缺失补齐、不一致替换、一致跳过 | 1.8.6 |
 
 点击插件名看详细文档。
 
@@ -30,6 +30,7 @@
 
 ### 版本历史
 
+- [RELEASE v1.8.6](RELEASE_v1.8.6.md) —— 图标改用 raw.githubusercontent.com（MP 图片代理的域名白名单不含 jsDelivr）
 - [RELEASE v1.8.5](RELEASE_v1.8.5.md) —— 修「MP 显示不了插件图标」+ 设置页工厂化（界面零变化）
 - [RELEASE v1.8.4](RELEASE_v1.8.4.md) —— 修报告文案矛盾 + 消除四处结构性重复（不改判定行为）
 - [RELEASE v1.8.3](RELEASE_v1.8.3.md) —— 选图补上「分辨率兜底」：评分与票数都并列时取更大的那张
@@ -54,7 +55,7 @@ MoviePilot-Plugins/
 │   ├── NfoGapFill.md
 │   └── DEPLOY.md
 ├── create_release.sh                  # 发版脚本（打 zip + 建 Release + 上传附件）
-└── RELEASE_v1.8.5.md / RELEASE_v1.8.4.md / RELEASE_v1.8.3.md / RELEASE_v1.8.2.md / RELEASE_v1.8.1.md / RELEASE_v1.8.0.md / RELEASE_v1.7.8.md / RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
+└── RELEASE_v1.8.6.md / RELEASE_v1.8.5.md / RELEASE_v1.8.4.md / RELEASE_v1.8.3.md / RELEASE_v1.8.2.md / RELEASE_v1.8.1.md / RELEASE_v1.8.0.md / RELEASE_v1.7.8.md / RELEASE_v1.7.7.md / RELEASE_v1.7.6.md
 ```
 
 约定：

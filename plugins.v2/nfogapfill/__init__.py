@@ -192,17 +192,28 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.8.5"
-# 插件图标：**必须是绝对 URL**。
-# MP 取图标的路径有两条（app/core/plugin.py）：
-#   · 已安装插件 → 读本类的 plugin_icon 属性（第 1427 行）
-#   · 市场里的插件 → 读 package.v2.json 的 "icon" 字段（第 1688 行）
-# 而 MP 安装插件时**只下载 plugins.v2/{插件ID}/** 下的文件（见 __get_file_list），
-# 仓库根目录的 icons/ 不会进插件目录 —— 所以这里写裸文件名（如 "NfoGapFill.png"）
-# 在已安装插件卡片上必然是 404、图标空白。这里和 package.v2.json 的 icon
-# 必须指向同一个地址，改成 CDN 是因为 raw.githubusercontent.com 在国内常被挡。
-PLUGIN_ICON = ("https://cdn.jsdelivr.net/gh/2804826634/MoviePilot-Plugins@main/"
-               "icons/nfogapfill.png")
+PLUGIN_VERSION = "1.8.6"
+# 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
+#
+# 三条约束（都踩过坑，别改回去）：
+# 1. MP 取图标有两条路（app/core/plugin.py）：
+#      · 已安装插件 → 读本类的 plugin_icon 属性（第 1427 行）
+#      · 市场条目   → 读 package.v2.json 的 icon 字段（第 1688 行）
+#    且 _merge_plugin_market_metadata() 合并市场元数据时不包含 icon ——
+#    所以已安装插件的图标永远来自这个类属性。
+# 2. 不能写裸文件名：MP 安装插件只下载 plugins.v2/{插件ID}/（__get_file_list），
+#    仓库根目录的 icons/ 不进插件目录；而前端的裸文件名分支
+#    `./plugin_icon/{name}` 只服务 MP 自带的插件（实测：别人的裸文件名图标
+#    能取到，我们的是 404）。
+# 3. ★ 域名必须在 MP 的 SECURITY_IMAGE_DOMAINS 白名单里。
+#    前端对绝对 URL 走的是**服务端图片代理**
+#    `api/v1/system/img/1?imgurl=...`（app/api/endpoints/system.py 的 proxy_img），
+#    该接口按 settings.SECURITY_IMAGE_DOMAINS 过滤域名，不在白名单就拒绝抓取，
+#    图标永远出不来。实测某台 MP 的白名单含 raw.githubusercontent.com / github.com，
+#    **不含 cdn.jsdelivr.net** —— 所以这里必须用 raw.githubusercontent.com
+#    （官方插件仓库也是这么写的）。
+PLUGIN_ICON = ("https://raw.githubusercontent.com/2804826634/MoviePilot-Plugins/"
+               "main/icons/nfogapfill.png")
 TIMEOUT = 25
 WEEKLY_CRON = "0 3 * * 0"   # 「执行周期」留空时的默认值：每周日 03:00 跑一次
 RATE_GAP = 0.25          # TMDB 限速基准：单线程下最快 4 请求/秒
