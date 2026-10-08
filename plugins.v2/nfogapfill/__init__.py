@@ -107,6 +107,10 @@ NfoGapFill —— NFO 与图片元数据「差异比对 → 按需替换」工�
         图片画质     = 原始尺寸（不再提供「标准画质」档）；
         背景图选取顺序 = 跟随 TMDB 官网列表顺序（web，不限语言、不重排）。
 
+    v1.9.2 起取消「写入前备份」：插件不再生成 .nfo-backup（引擎的 backup /
+    backup_dir 能力仍保留，CLI 侧仍可用 --backup-dir）。改写不可回滚，
+    因此修改前请用「只报告差异 + 演练模式」确认清单。
+
     v1.8.0 起配置页不再提供「保护字段」；想保住手工润色的内容请用「只补缺失」（gapfill）模式。
     引擎层的 EngineConfig.protect_fields 精细语义仍保留，供代码直接调用
     （引擎与 CLI 的 --only 也保留「只处理某几个字段」的能力）。
@@ -196,7 +200,7 @@ except Exception:
     CronTrigger = None
 
 
-PLUGIN_VERSION = "1.9.1"
+PLUGIN_VERSION = "1.9.2"
 # 插件图标：**必须是绝对 URL，而且域名要在 MP 的图片白名单里。**
 #
 # 三条约束（都踩过坑，别改回去）：
@@ -3069,7 +3073,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
     _exclude_paths: str = ""
     _respect_lock: bool = True
     _dry_run: bool = False
-    _backup: bool = True
     _language: str = "zh-CN"
     _notify: bool = True
     _image_mode: str = IMG_SYNC
@@ -3100,7 +3103,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             self._exclude_paths = config.get("exclude_paths") or ""
             self._respect_lock = bool(config.get("respect_lock", True))
             self._dry_run = bool(config.get("dry_run"))
-            self._backup = bool(config.get("backup", True))
             self._language = config.get("language") or "zh-CN"
             self._notify = bool(config.get("notify", True))
             self._image_mode = config.get("image_mode") or IMG_SYNC
@@ -3173,6 +3175,11 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
 
         内容与顺序即界面上看到的顺序；控件用下面的 form_* 小工厂搭，
         加一个配置项通常只需要新增一行。
+
+        排版约定（v1.9.2 起）：
+          ① 成对的短配置尽量并排（各占 md=6），避免出现「一行只有一个下拉」的孤行；
+          ② 说明条（VAlert）按主题合并，同一主题只留一条，避免整页被大段文字撑长；
+          ③ 顺序固定为「运行 → 图片 → 目录 → 说明」，与使用时的决策顺序一致。
         """
         return [{
             "component": "VForm",
@@ -3199,8 +3206,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                         "en-US": "English",
                         "ja-JP": "日本語",
                     }),
-                ),
-                form_row(
                     form_select("concurrency", "并发数（加快比对速度）", {
                         "1": "1 — 顺序执行（最省资源）",
                         "4": "4 — 推荐（默认）",
@@ -3209,46 +3214,29 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     }),
                 ),
                 form_row(form_alert(
-                    "开销集中在网络等待（下载图片、查 TMDB / fanart.tv），"
-                    "磁盘与 CPU 压力很小 —— 开大基本只有好处。")),
+                    "开销集中在网络等待（下载图片、查 TMDB / fanart.tv），磁盘与 CPU 压力很小"
+                    "—— 并发数开大基本只有好处。")),
                 form_row(
                     form_switch("dry_run", "演练模式（只记录将要修改的内容，不写盘）"),
                     form_switch("respect_lock", "尊重 NFO 内的 lockdata / lockedfields"),
                 ),
-                form_row(
-                    form_switch("backup", "写入前备份原 NFO / 图片到 .nfo-backup"),
-                ),
-                form_row(form_alert(
-                    "演员**全部写入**（按 TMDB 返回的全写，不再限制 10/20/30/50 位）；"
-                    "图片始终按**原始尺寸**下载（海报原图 / 背景原图，不再提供「标准画质」档，"
-                    "体积会明显更大，但最清晰）。")),
                 form_row(
                     form_select("image_mode", "图片处理", {
                         "sync": "缺失补齐 + 不一致替换（推荐）",
                         "missing": "只补缺失图片（不比对、不替换已有图）",
                         "off": "完全不处理图片",
                     }),
-                ),
-                form_row(
                     form_select("image_sources", "图片来源优先级", {
                         "tmdb,fanart": "TMDB 优先，fanart.tv 其次（推荐）",
                         "fanart,tmdb": "fanart.tv 优先，TMDB 其次",
                         "tmdb": "只用 TMDB（不做 fanart 兜底）",
                         "fanart": "只用 fanart.tv（不做 TMDB 兜底）",
-                    }, md=12),
-                    form_alert(
-                        "同一类图两个源都有时，按这里的顺序取第一个命中的。"
-                        "注意源本身有差别：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图"
-                        "**只有 fanart.tv 有** —— 这几类无论顺序如何都只能取 fanart 的。"),
+                    }),
                 ),
                 form_row(form_alert(
-                    "背景图固定**跟随 TMDB 官网顺序**：直接取官网 images 页列表第一张"
-                    "（常为「无语言」的高分大图），不做语言过滤、也不重排。")),
-                form_row(form_alert(
-                    "其余图片（海报 / 徽标 / 剧照）仍按「元数据语言」优先：先取本语言图、"
-                    "**按评分（vote_average）从高到低**；本语言一张都没有时"
-                    "不再限定语言，**从全部候选里按评分从高到低取**。"
-                    "评分相同时票数多的优先，再相同则取分辨率更大的那张。")),
+                    "同一类图两个源都有时，按「图片来源优先级」取第一个命中的。"
+                    "注意源本身有差别：横幅图 / 光盘图 / 透明艺术图 / 横版缩略图"
+                    "**只有 fanart.tv 有** —— 这几类无论顺序如何都只能取 fanart 的。")),
                 form_row(
                     form_select("tmdb_image_kinds", "TMDB 提供的图片类型（可多选）", {
                         "poster": "海报（poster.jpg）",
@@ -3265,17 +3253,19 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                     }, multiple=True, chips=True),
                 ),
                 form_row(form_alert(
-                    "两个下拉各管一个数据源，实际处理的是它们的**并集**。"
-                    "「缩略图」两边都有：电影 / 剧集 / 季取自 fanart 横版图，"
-                    "单集取自 TMDB 剧照 —— 勾任意一边即可生效。")),
+                    "两个下拉各管一个数据源，实际处理的是它们的**并集**（都不选 = 不处理图片）。"
+                    "「缩略图」两边都有：电影 / 剧集 / 季取自 fanart 横版图，单集取自 TMDB 剧照"
+                    "—— 勾任意一边即可生效。落盘命名：海报 → poster.jpg；背景图 → backdrop.jpg"
+                    " + fanart.jpg；徽标 → logo.png；缩略图 → thumb.jpg + landscape.jpg"
+                    "（单集则用剧照写成与视频同名的 .jpg）；横幅图 → banner.jpg；光盘图 → disc.png"
+                    "（仅电影）；透明艺术图 → clearart.png。季图片与 MP 官方一致：季目录内写通用名，"
+                    "剧集根目录同时写一份 seasonNN-poster.jpg。")),
                 form_row(form_alert(
-                    "勾选后会写成：海报 → poster.jpg；背景图 → backdrop.jpg + fanart.jpg；"
-                    "徽标 → logo.png；缩略图 → thumb.jpg + landscape.jpg（单集则用剧照"
-                    "写成与视频同名的 .jpg）；横幅图 → banner.jpg；"
-                    "光盘图 → disc.png（仅电影）；透明艺术图 → clearart.png。"
-                    "季图片与 MP 官方一致，季目录内写通用名，"
-                    "剧集根目录同时写一份 seasonNN-poster.jpg。"
-                    "两个下拉都不选 = 不处理任何图片。")),
+                    "选图规则：**背景图固定跟随 TMDB 官网顺序** —— 直接取官网 images 页列表第一张"
+                    "（常为「无语言」的高分大图），不做语言过滤、也不重排。"
+                    "其余图片（海报 / 徽标 / 剧照）按「元数据语言」优先：先取本语言图、"
+                    "**按评分从高到低**；本语言一张都没有时不再限定语言、从全部候选里按评分取；"
+                    "评分相同时票数多的优先，再相同取分辨率更大的那张。")),
                 form_row(
                     form_textarea("paths",
                                   "媒体库目录（每行一个，行尾可加 #电影 / #电视剧）",
@@ -3289,27 +3279,21 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                                   rows=5, md=5),
                 ),
                 form_row(form_alert(
-                    "「媒体库目录」行尾加 #电影 或 #电视剧，可限定该目录只处理对应类型；"
-                    "不加则两种都处理。别名也认：movie / tv / series。")),
+                    "「媒体库目录」行尾加 #电影 或 #电视剧，可限定该目录只处理对应类型（不加则两种都处理；"
+                    "别名也认：movie / tv / series）。「排除路径」按路径片段做包含匹配，命中即跳过该目录"
+                    "（如 Extras、@eaDir、Sample）—— 用来避开剧照集、字幕样板等无关目录。")),
                 form_row(form_alert(
-                    "「排除路径」按路径片段做包含匹配，命中即跳过该目录（如 Extras、"
-                    "@eaDir、Sample）—— 用来避开剧照集、字幕样板等无关目录。")),
+                    "以下行为已固定、无需配置：演员**全部写入**（按 TMDB 返回的全写）；图片按"
+                    "**原始尺寸**下载（体积会明显变大）；TMDB API Key 与代理**自动沿用 MoviePilot** 的"
+                    "设置（想换 Key 改 MP 即可；两者都拿不到时退回宿主刮削通道，只有海报与背景图可用）；"
+                    "**不做备份**（不再生成 .nfo-backup），修改前请先用「只报告差异 + 演练模式」确认。")),
                 form_row(form_alert(
-                    "TMDB API Key 与代理均**自动沿用 MoviePilot 的配置**"
-                    "（设置 → TMDB / 网络），插件里不再提供输入框；"
-                    "想换 Key 直接改 MoviePilot 的设置即可。"
-                    "两者都拿不到时会退回宿主刮削通道（只有海报与背景图可用）。")),
+                    "NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），固定取**美国（US）**地区的分级；"
+                    "若该片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，不会在 NFO 里留空。"
+                    "「不一致则替换」会修正与 TMDB 不同的字段（如过时的简介、错误的年份）；"
+                    "想保住手工润色的内容，可改用「只补缺失」，这样已有内容一律不动。")),
                 form_row(form_alert(
-                    "NFO 里的 <mpaa> 存的是影视分级（PG-13、R 这类），"
-                    "固定取**美国（US）**地区的分级。"
-                    "若该片在 TMDB 上没有美国分级，会自动退回到任意有值的地区，"
-                    "不会在 NFO 里留空。")),
-                form_row(form_alert(
-                    "「不一致则替换」会修正与 TMDB 不同的字段（例如过时的简介、错误的年份）。"
-                    "若想保住手工润色的内容，可改用「只补缺失」，"
-                    "这样已有内容一律不动。")),
-                form_row(form_alert(
-                    "建议先用「只报告差异 + 演练模式」跑一轮：运行结束后本页会列出«将要修改哪些文件»，"
+                    "建议首次使用先跑一轮「只报告差异 + 演练模式」：结束后本页会列出«将要修改哪些文件»，"
                     "对着清单确认无误，再切换为「不一致则替换」正式执行。", type_="warning")),
             ],
         }], {
@@ -3321,7 +3305,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
             "concurrency": "4",
             "dry_run": False,
             "respect_lock": True,
-            "backup": True,
             "paths": "",
             "exclude_paths": "",
             "language": "zh-CN",
@@ -3497,7 +3480,6 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 "concurrency": str(self._concurrency),
                 "dry_run": self._dry_run,
                 "respect_lock": self._respect_lock,
-                "backup": self._backup,
                 "paths": self._paths,
                 "exclude_paths": self._exclude_paths,
                 "language": self._language,
@@ -3593,7 +3575,7 @@ class NfoGapFill(_PluginBase):  # type: ignore[misc]
                 only_fields=set(),    # 插件已移除「字段白名单」（引擎与 CLI 的 --only 仍保留该能力）
                 respect_lock=self._respect_lock,
                 dry_run=self._dry_run,
-                backup=self._backup,
+                backup=False,         # v1.9.2 起插件不做备份（引擎与 CLI 的 --backup-dir 能力仍保留）
                 max_files=0,          # 插件不再提供单轮上限（引擎仍支持，CLI 用 --max-files）
                 concurrency=self._concurrency,
                 image_mode=normalize_image_mode(self._image_mode),
